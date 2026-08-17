@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Game Library</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-text">Library</span>
+      <span class="count" id="count"></span>
+    </div>
+
+    <div class="search-wrap">
+      <input id="search" type="search" placeholder="Search games…" autocomplete="off" spellcheck="false">
+      <kbd class="hint">/</kbd>
+    </div>
+
+    <div class="controls">
+      <select id="sort" title="Sort">
+        <option value="name">Name</option>
+        <option value="last">Last played</option>
+        <option value="playtime">Playtime</option>
+        <option value="size">Size on disk</option>
+      </select>
+      <button id="sizes-btn" class="ghost" title="Walk folders to measure size on disk">Measure sizes</button>
+      <button id="rescan-btn" class="ghost" title="Rescan all sources">Rescan</button>
+    </div>
+  </header>
+
+  <nav class="filters" id="filters"></nav>
+
+  <main>
+    <div id="grid" class="grid"></div>
+    <p id="empty" class="empty" hidden>Nothing matches that search.</p>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <div id="menu" class="menu" hidden role="menu"></div>
+
+  <div id="modal" class="modal-backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <h2 id="modal-title">Title</h2>
+      <div id="modal-body"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="ghost">Cancel</button>
+        <button id="modal-save" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

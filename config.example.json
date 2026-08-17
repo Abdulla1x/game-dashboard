@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy to config.json and edit. Anything omitted falls back to DEFAULTS in config.py.",
+
+  "port": 8777,
+  "browser": "chrome",
+  "window_size": "1400,900",
+  "playtime_poll_seconds": 15,
+
+  "scan_roots": [
+    "E:\\Games",
+    "D:\\Games",
+    "D:\\Loading Bay Games",
+    "G:\\"
+  ],
+  "extra_game_dirs": [
+    "D:\\Fortnite"
+  ],
+
+  "steam_root": "C:\\Program Files (x86)\\Steam",
+  "epic_manifests": "C:\\ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests",
+  "xbox_games": "C:\\XboxGames",
+  "riot_root": "D:\\Riot Games",
+
+  "windows_user": "YourWindowsUsername"
+}
