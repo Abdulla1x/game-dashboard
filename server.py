@@ -69,10 +69,15 @@ def games_payload():
         entry = stats.get(game["id"]) or {}
         tracked_total = entry.get("total_seconds", 0)
         tracked_last = entry.get("last_played")
+        art_kind, art_version = art.cache_state(game)
         out.append({
             **game,
             "running": game["id"] in active,
-            "playtime_seconds": tracked_total,
+            "art_kind": art_kind,
+            "art_version": art_version,
+            # Steam reports lifetime playtime for owned games; our own tracker only
+            # knows what it has watched, so prefer it and fall back to Steam's number.
+            "playtime_seconds": tracked_total or (game.get("playtime_minutes") or 0) * 60,
             # Steam knows when *it* last ran a game; our own tracking is more recent
             # when it exists, so prefer it and fall back to Steam's record.
             "last_played": tracked_last or game.get("last_played"),
@@ -136,6 +141,9 @@ def compute_sizes():
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "GameDashboard/1.0"
+    # Without this the default is HTTP/1.0, i.e. Connection: close, so every one of the
+    # tiles opens its own TCP connection and a full art reload takes about a second.
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
         pass  # the default logger writes a line per request; too noisy
@@ -158,15 +166,32 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def _send_file(self, path, cache=False):
+    def _send_file(self, path, cache=False, extra=None):
         try:
+            stamp = os.path.getmtime(path)
             with open(path, "rb") as fh:
                 body = fh.read()
         except OSError:
             return self._send(404, {"error": "not found"})
+
+        headers = dict(extra or {})
+        if cache:
+            headers.setdefault("Cache-Control", "public, max-age=86400")
+        etag = '"%x-%x"' % (int(stamp), len(body))
+        headers["ETag"] = etag
+
+        # A tile that is still showing the right image must not be re-sent; that round
+        # trip is what makes the grid blink when it re-renders.
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            for key, value in headers.items():
+                self.send_header(key, value)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
+
         ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        extra = {"Cache-Control": "public, max-age=86400"} if cache else {}
-        return self._send(200, body, ctype, extra)
+        return self._send(200, body, ctype, headers)
 
     def _body_json(self):
         try:
@@ -308,7 +333,7 @@ def _forget_art(game_id):
     """Drop cached art so a corrected appid takes effect immediately."""
     import re
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", game_id)
-    for ext in (".jpg", ".png", ".miss"):
+    for ext in (".jpg", ".png", ".card.svg", ".miss"):
         try:
             os.remove(os.path.join(config.ART_DIR, safe + ext))
         except OSError:
@@ -316,6 +341,7 @@ def _forget_art(game_id):
 
 
 def serve(port=None, open_browser=False):
+    config.safe_console()
     config.ensure_dirs()
     cfg = config.load()
     port = port or cfg["port"]

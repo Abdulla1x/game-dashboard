@@ -84,6 +84,24 @@ select:hover, .ghost:hover { background: var(--surface-2); border-color: #333b4d
 .primary:hover { filter: brightness(1.08); }
 .ghost[disabled] { opacity: .5; cursor: default; }
 
+.seg {
+  display: flex;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg button {
+  padding: 8px 13px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.seg button:hover { background: var(--surface-2); color: var(--text); }
+.seg button.on { background: var(--accent-dim); color: #fff; }
+
 /* ---------- filters ---------- */
 
 .filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 22px 4px; }
@@ -150,7 +168,9 @@ main { padding: 14px 22px 60px; }
   line-height: 1.3;
   text-shadow: 0 1px 3px rgba(0, 0, 0, .8);
 }
+.card .title { display: block; }
 .card .meta { display: block; color: var(--muted); font-weight: 400; font-size: 11px; margin-top: 2px; }
+.card .meta:empty { display: none; }
 
 .card .badge {
   position: absolute; top: 8px; left: 8px;
@@ -161,6 +181,12 @@ main { padding: 14px 22px 60px; }
 }
 .card.running .badge { background: var(--good); color: #062017; }
 .card.hidden-game { opacity: .42; }
+
+/* Owned but not on disk: still browsable, visibly not ready to play. */
+.card.not-installed img { filter: saturate(.45) brightness(.62); }
+.card.not-installed:hover img { filter: saturate(.8) brightness(.85); }
+.card.not-installed .badge { background: rgba(8, 10, 15, .8); color: #8fa3c4; }
+.card.not-installed .label { background: linear-gradient(180deg, transparent, rgba(6, 8, 12, .88) 58%); }
 
 .card .more {
   position: absolute; top: 6px; right: 6px;

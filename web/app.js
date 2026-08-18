@@ -1,13 +1,43 @@
 "use strict";
 
-const state = {
-  games: [],
-  query: "",
-  sort: "name",
-  sources: new Set(),   // empty = all
-  showHidden: false,
-  busy: new Set(),
-};
+/* UI state is persisted so the view survives a reload — the window is usually opened,
+   used, and closed again rather than left running. */
+const STORE_KEY = "gd.ui";
+
+function loadState() {
+  const base = {
+    games: [],
+    query: "",
+    sort: "name",
+    view: "installed",    // "installed" | "all"
+    sources: new Set(),   // empty = all
+    showHidden: false,
+    busy: new Set(),
+  };
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
+    if (saved.sort) base.sort = saved.sort;
+    if (saved.view) base.view = saved.view;
+    if (Array.isArray(saved.sources)) base.sources = new Set(saved.sources);
+    base.showHidden = !!saved.showHidden;
+  } catch (err) {
+    /* corrupt or unavailable storage is not worth failing the app over */
+  }
+  return base;
+}
+
+const state = loadState();
+
+function saveState() {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({
+      sort: state.sort,
+      view: state.view,
+      sources: [...state.sources],
+      showHidden: state.showHidden,
+    }));
+  } catch (err) { /* ignore */ }
+}
 
 const $ = (id) => document.getElementById(id);
 const grid = $("grid");
@@ -29,13 +59,33 @@ async function api(path, options) {
   return data;
 }
 
+// Only the fields that actually affect the DOM. The 30s poll almost always returns an
+// identical library, and re-rendering an unchanged grid is what made it flicker.
+function signature(games) {
+  let out = "";
+  for (const g of games) {
+    out += `${g.id}\u0001${g.name}\u0001${g.source}\u0001${g.running ? 1 : 0}` +
+           `\u0001${g.hidden ? 1 : 0}` +
+           `\u0001${g.installed === false ? 0 : 1}\u0001${g.playtime_seconds || 0}` +
+           `\u0001${g.last_played || 0}\u0001${g.size_bytes || 0}` +
+           `\u0001${g.art_version || 0}\u0001${g.art_kind || ""}\u0002`;
+  }
+  return out;
+}
+
+let lastSignature = null;
+
 async function refresh() {
   try {
     const data = await api("/api/games");
-    state.games = data.games;
     $("sizes-btn").disabled = data.sizing;
     $("rescan-btn").disabled = data.scanning;
     if (data.scanning || data.sizing) setTimeout(refresh, 2500);
+
+    const sig = signature(data.games);
+    state.games = data.games;
+    if (sig === lastSignature) return;   // nothing visible changed; leave the DOM alone
+    lastSignature = sig;
     render();
   } catch (err) {
     toast(err.message, true);
@@ -69,10 +119,13 @@ function fmtWhen(unix) {
 
 /* ---------- filtering ---------- */
 
+const isInstalled = (g) => g.installed !== false;
+
 function visibleGames() {
   const q = state.query.trim().toLowerCase();
   let list = state.games.filter((g) => {
     if (g.hidden && !state.showHidden) return false;
+    if (state.view === "installed" && !isInstalled(g)) return false;
     if (state.sources.size && !state.sources.has(g.source)) return false;
     if (q && !g.name.toLowerCase().includes(q)) return false;
     return true;
@@ -84,48 +137,76 @@ function visibleGames() {
     last: (a, b) => (b.last_played || 0) - (a.last_played || 0),
     playtime: (a, b) => (b.playtime_seconds || 0) - (a.playtime_seconds || 0),
   };
-  return list.sort(by[state.sort] || by.name);
+  const cmp = by[state.sort] || by.name;
+  // Installed first in the "All" view, so the library you can actually play stays on top.
+  return list.sort((a, b) => (isInstalled(b) - isInstalled(a)) || cmp(a, b));
 }
 
 /* ---------- rendering ---------- */
 
+/* Cards are keyed by game id and reused. Rebuilding the grid would recreate every
+   <img>, and a fresh <img> paints its empty background before the bytes are back —
+   that is a full-grid blink on every poll, search keystroke and filter click. */
+const cards = new Map();
+
 function render() {
   const list = visibleGames();
-  grid.textContent = "";
+  const seen = new Set();
+  let prev = null;
 
-  for (const game of list) grid.appendChild(card(game));
+  for (const game of list) {
+    let el = cards.get(game.id);
+    if (!el) {
+      el = createCard(game);
+      cards.set(game.id, el);
+    }
+    updateCard(el, game);
+    seen.add(game.id);
+
+    // Move only when the position is actually wrong; moving a node keeps its images.
+    const target = prev ? prev.nextSibling : grid.firstChild;
+    if (el !== target) grid.insertBefore(el, target);
+    prev = el;
+  }
+
+  for (const [id, el] of cards) {
+    if (!seen.has(id)) {
+      el.remove();
+      cards.delete(id);
+    }
+  }
 
   $("empty").hidden = list.length > 0;
-  const total = state.games.filter((g) => !g.hidden).length;
-  $("count").textContent = list.length === total
-    ? `${total} games`
-    : `${list.length} of ${total}`;
+  const pool = state.games.filter((g) => !g.hidden &&
+    (state.view === "all" || isInstalled(g)));
+  $("count").textContent = list.length === pool.length
+    ? `${pool.length} games`
+    : `${list.length} of ${pool.length}`;
 
   renderFilters();
 }
 
-function card(game) {
+function createCard(game) {
   const el = document.createElement("article");
   el.className = "card";
   el.tabIndex = 0;
-  if (game.running) el.classList.add("running");
-  if (game.hidden) el.classList.add("hidden-game");
-  if (state.busy.has(game.id)) el.classList.add("busy");
   el.dataset.id = game.id;
 
   const img = document.createElement("img");
-  img.loading = "lazy";
   img.alt = "";
-  img.src = `/api/art?id=${encodeURIComponent(game.id)}`;
-  // Extracted icons are tiny; contain rather than stretch them.
+  img.loading = "lazy";
+  img.decoding = "async";
+  // `art_kind` from /api/games is only a guess used to style the tile before the image
+  // decodes. Once it has, the image itself is the authority — a card built after that
+  // payload was assembled arrives 600px wide and must not keep the shrunken icon
+  // treatment it was optimistically given.
   img.addEventListener("load", () => {
-    if (img.naturalWidth && img.naturalWidth < 200) img.classList.add("is-icon");
+    img.classList.toggle("is-icon", !!img.naturalWidth && img.naturalWidth < 200);
   });
   el.appendChild(img);
 
   const badge = document.createElement("span");
   badge.className = "badge";
-  badge.textContent = game.running ? "Running" : (SOURCE_LABEL[game.source] || game.source);
   el.appendChild(badge);
 
   const more = document.createElement("button");
@@ -135,77 +216,132 @@ function card(game) {
   more.addEventListener("click", (ev) => {
     ev.stopPropagation();
     const r = more.getBoundingClientRect();
-    openMenu(game, r.left, r.bottom + 4);
+    openMenu(el._game, r.left, r.bottom + 4);
   });
   el.appendChild(more);
 
   const label = document.createElement("div");
   label.className = "label";
-  label.textContent = game.name;
-
-  const bits = [];
-  if (game.playtime_seconds) bits.push(fmtPlaytime(game.playtime_seconds));
-  else if (game.last_played) bits.push(fmtWhen(game.last_played));
-  if (game.size_bytes) bits.push(fmtSize(game.size_bytes));
-  if (bits.length) {
-    const meta = document.createElement("span");
-    meta.className = "meta";
-    meta.textContent = bits.join(" · ");
-    label.appendChild(meta);
-  }
+  const title = document.createElement("span");
+  title.className = "title";
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  label.append(title, meta);
   el.appendChild(label);
 
-  el.addEventListener("click", () => play(game));
+  // Handlers read el._game so a reused card never acts on a stale record.
+  el.addEventListener("click", () => play(el._game));
   el.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); play(game); }
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); play(el._game); }
   });
   el.addEventListener("contextmenu", (ev) => {
     ev.preventDefault();
-    openMenu(game, ev.clientX, ev.clientY);
+    openMenu(el._game, ev.clientX, ev.clientY);
   });
+
+  el._img = img;
+  el._badge = badge;
+  el._title = title;
+  el._meta = meta;
   return el;
 }
+
+function updateCard(el, game) {
+  el._game = game;
+  const installed = isInstalled(game);
+
+  el.classList.toggle("running", !!game.running);
+  el.classList.toggle("hidden-game", !!game.hidden);
+  el.classList.toggle("busy", state.busy.has(game.id));
+  el.classList.toggle("not-installed", !installed);
+
+  // Re-assigning src restarts the load even when the bytes are identical, so only do
+  // it when the art has genuinely changed.
+  const src = `/api/art?id=${encodeURIComponent(game.id)}&v=${game.art_version || 0}`;
+  if (el._img.getAttribute("src") !== src) el._img.setAttribute("src", src);
+  el._img.classList.toggle("is-icon", game.art_kind === "icon");
+
+  const badge = game.running ? "Running"
+    : (installed ? (SOURCE_LABEL[game.source] || game.source) : "Not installed");
+  if (el._badge.textContent !== badge) el._badge.textContent = badge;
+
+  if (el._title.textContent !== game.name) el._title.textContent = game.name;
+
+  const bits = [];
+  if (installed) {
+    if (game.playtime_seconds) bits.push(fmtPlaytime(game.playtime_seconds));
+    else if (game.last_played) bits.push(fmtWhen(game.last_played));
+    if (game.size_bytes) bits.push(fmtSize(game.size_bytes));
+  } else if (game.playtime_seconds) {
+    bits.push(fmtPlaytime(game.playtime_seconds));
+  }
+  const meta = bits.join(" · ");
+  if (el._meta.textContent !== meta) el._meta.textContent = meta;
+}
+
+let lastFilters = null;
 
 function renderFilters() {
   const counts = {};
   for (const g of state.games) {
     if (g.hidden && !state.showHidden) continue;
+    if (state.view === "installed" && !isInstalled(g)) continue;
     counts[g.source] = (counts[g.source] || 0) + 1;
   }
+  const hiddenCount = state.games.filter((g) => g.hidden).length;
+
+  // The chip bar is small but rebuilding it on every poll is still visible churn.
+  const sig = JSON.stringify([counts, [...state.sources], state.showHidden, hiddenCount]);
+  if (sig === lastFilters) return;
+  lastFilters = sig;
 
   const box = $("filters");
   box.textContent = "";
 
+  const chip = (text, count, on, onClick) => {
+    const b = document.createElement("button");
+    b.className = "chip" + (on ? " on" : "");
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = count;
+    b.append(document.createTextNode(text), n);
+    b.addEventListener("click", onClick);
+    box.appendChild(b);
+  };
+
   for (const source of Object.keys(counts).sort()) {
-    const chip = document.createElement("button");
-    chip.className = "chip" + (state.sources.has(source) ? " on" : "");
-    chip.innerHTML = `${SOURCE_LABEL[source] || source}<span class="n">${counts[source]}</span>`;
-    chip.addEventListener("click", () => {
+    chip(SOURCE_LABEL[source] || source, counts[source], state.sources.has(source), () => {
       state.sources.has(source) ? state.sources.delete(source) : state.sources.add(source);
+      saveState();
       render();
     });
-    box.appendChild(chip);
   }
 
-  const hiddenCount = state.games.filter((g) => g.hidden).length;
   if (hiddenCount) {
-    const chip = document.createElement("button");
-    chip.className = "chip" + (state.showHidden ? " on" : "");
-    chip.innerHTML = `Hidden<span class="n">${hiddenCount}</span>`;
-    chip.addEventListener("click", () => { state.showHidden = !state.showHidden; render(); });
-    box.appendChild(chip);
+    chip("Hidden", hiddenCount, state.showHidden, () => {
+      state.showHidden = !state.showHidden;
+      saveState();
+      render();
+    });
   }
 }
 
 /* ---------- actions ---------- */
 
-async function play(game) {
-  if (state.busy.has(game.id)) return;
+function play(game) {
+  if (!game || state.busy.has(game.id)) return;
+  // Installing is a much bigger commitment than launching — a stray click should not
+  // start a 100 GB download.
+  if (!isInstalled(game)) return confirmInstall(game);
+  return start(game, `Launching ${game.name}`);
+}
+
+async function start(game, message) {
   state.busy.add(game.id);
   render();
   try {
     await api("/api/launch", { method: "POST", body: JSON.stringify({ id: game.id }) });
-    toast(`Launching ${game.name}`);
+    toast(message);
   } catch (err) {
     toast(`${game.name}: ${err.message}`, true);
   } finally {
@@ -213,8 +349,20 @@ async function play(game) {
   }
 }
 
+function confirmInstall(game) {
+  openModal(`Install ${game.name}?`, (body) => {
+    const note = document.createElement("p");
+    note.style.cssText = "margin:0;color:var(--muted);font-size:13px;line-height:1.5";
+    note.textContent =
+      `${game.name} is in your library but not installed. This hands the download to ` +
+      `${SOURCE_LABEL[game.source] || game.source}, which will ask you where to put it.`;
+    body.appendChild(note);
+  }, () => start(game, `Installing ${game.name}`), "Install");
+}
+
 async function override(id, fields) {
   await api("/api/override", { method: "POST", body: JSON.stringify({ id, ...fields }) });
+  lastSignature = null;   // force a re-render; the override changed something visible
   await refresh();
 }
 
@@ -223,6 +371,7 @@ async function override(id, fields) {
 const menu = $("menu");
 
 function openMenu(game, x, y) {
+  if (!game) return;
   menu.textContent = "";
 
   const add = (text, fn) => {
@@ -232,8 +381,9 @@ function openMenu(game, x, y) {
     menu.appendChild(b);
   };
 
-  add("Launch", () => play(game));
-  if (game.install_dir) {
+  const installed = isInstalled(game);
+  add(installed ? "Launch" : "Install\u2026", () => play(game));
+  if (installed && game.install_dir) {
     add("Open folder", async () => {
       try {
         await api("/api/reveal", { method: "POST", body: JSON.stringify({ id: game.id }) });
@@ -242,7 +392,7 @@ function openMenu(game, x, y) {
   }
   menu.appendChild(document.createElement("hr"));
   add("Rename\u2026", () => renameDialog(game));
-  if (game.install_dir) add("Pick executable\u2026", () => exeDialog(game));
+  if (installed && game.install_dir) add("Pick executable\u2026", () => exeDialog(game));
   add("Fix cover art\u2026", () => artDialog(game));
   menu.appendChild(document.createElement("hr"));
   add(game.hidden ? "Unhide" : "Hide", () => override(game.id, { hidden: !game.hidden }));
@@ -263,8 +413,9 @@ document.addEventListener("scroll", closeMenu, true);
 const modal = $("modal");
 let onSave = null;
 
-function openModal(title, buildBody, save) {
+function openModal(title, buildBody, save, saveLabel) {
   $("modal-title").textContent = title;
+  $("modal-save").textContent = saveLabel || "Save";
   const body = $("modal-body");
   body.textContent = "";
   buildBody(body);
@@ -377,7 +528,28 @@ function toast(message, isError) {
 /* ---------- wiring ---------- */
 
 $("search").addEventListener("input", (ev) => { state.query = ev.target.value; render(); });
-$("sort").addEventListener("change", (ev) => { state.sort = ev.target.value; render(); });
+$("sort").addEventListener("change", (ev) => {
+  state.sort = ev.target.value;
+  saveState();
+  render();
+});
+
+for (const btn of document.querySelectorAll("#view-toggle button")) {
+  btn.addEventListener("click", () => {
+    if (state.view === btn.dataset.view) return;
+    state.view = btn.dataset.view;
+    saveState();
+    syncViewToggle();
+    render();
+  });
+}
+
+function syncViewToggle() {
+  for (const btn of document.querySelectorAll("#view-toggle button")) {
+    btn.classList.toggle("on", btn.dataset.view === state.view);
+    btn.setAttribute("aria-pressed", btn.dataset.view === state.view ? "true" : "false");
+  }
+}
 
 $("rescan-btn").addEventListener("click", async () => {
   $("rescan-btn").disabled = true;
@@ -401,5 +573,7 @@ document.addEventListener("keydown", (ev) => {
   }
 });
 
+$("sort").value = state.sort;
+syncViewToggle();
 refresh();
 setInterval(refresh, 30000);   // pick up running-state changes from the tracker
