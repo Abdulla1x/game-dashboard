@@ -1,18 +1,27 @@
 """Cover art resolution.
 
-Order: local Steam cache -> Steam CDN by appid -> Steam CDN via fuzzy name match ->
-extracted exe icon -> generated placeholder. Each hit is cached under data/art/.
+Nothing landscape is ever served as-is: cropping a header into a 2:3 tile throws away
+two thirds of it. Where a wide banner is all that exists, it gets letterboxed onto a
+generated card instead.
 
-Results carry a `kind` so the UI can style them differently: a real 600x900 `cover`
-is displayed edge to edge, while a 32px `icon` is centered on a tinted card rather
-than stretched into a blurry mess.
+Order: local Steam cache -> art the scanner supplied (Epic's own store art) -> Steam CDN
+by appid -> Steam CDN via fuzzy name match -> SteamGridDB (needs a key) -> a letterboxed
+Steam header -> a card generated from the executable's own icon -> generated placeholder.
+Each hit is cached under data/art/.
+
+Results carry a `kind` so the UI can style them differently. Everything except
+`placeholder` fills the tile edge to edge: a `cover` is real 2:3 art, while a `card` is
+drawn here from the exe's 256px icon on a colour sampled from that icon. Bare `icon` is
+only reached when the icon exists but could not be decoded to build a card from.
 """
 
+import base64
 import difflib
 import hashlib
 import json
 import os
 import re
+import struct
 import threading
 import time
 import urllib.error
@@ -20,11 +29,18 @@ import urllib.parse
 import urllib.request
 
 import config
+import peicon
 import winpath
 import winshell
 
 _CDN = "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/library_600x900.jpg"
-_CDN_ALT = "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"
+
+# SteamGridDB carries portrait covers for the many things Steam has no appid for —
+# launchers, Epic/Riot exclusives, mod clients. Needs a free key in config.json.
+_SGDB_SEARCH = "https://api.steamgriddb.com/api/v2/search/autocomplete/{term}"
+_SGDB_BY_STEAM = "https://api.steamgriddb.com/api/v2/games/steam/{appid}"
+_SGDB_GRIDS = ("https://api.steamgriddb.com/api/v2/grids/game/{gid}"
+               "?dimensions=600x900,342x482&types=static&nsfw=false")
 
 # Steam's community search: a targeted name -> appid lookup that needs no API key and
 # no 10 MB bulk download, and applies Steam's own fuzzy matching ("Elden Ring" finds
@@ -212,15 +228,20 @@ def _download(url, dest):
     return True
 
 
-# Portrait art first, then landscape as a last local resort. Newer Steam builds name the
-# portrait "library_capsule.jpg" where older ones used "library_600x900.jpg".
+# Portrait only. Newer Steam builds name the portrait "library_capsule.jpg" where older
+# ones used "library_600x900.jpg". The landscape "library_header.jpg" is deliberately not
+# here: at 460x215 in a 2:3 tile it gets cropped to the middle third and loses the title,
+# and a card generated from the game's own icon reads better than that.
 _LOCAL_ART_NAMES = (
     "library_600x900_2x.jpg",
     "library_600x900.jpg",
     "library_capsule_2x.jpg",
     "library_capsule.jpg",
-    "library_header.jpg",
 )
+
+# Landscape. Never served as-is — a 2:3 tile would crop away two thirds of it — but it
+# can be letterboxed into a card, which beats a lettered placeholder.
+_LOCAL_WIDE_NAMES = ("library_header.jpg", "header.jpg")
 
 
 def _local_steam_cover(cfg, appid):
@@ -260,7 +281,40 @@ def _local_steam_cover(cfg, appid):
     return None
 
 
+def _local_steam_wide(cfg, appid):
+    """Steam's landscape header for an appid, if that is all it has."""
+    base = winpath.native(
+        winpath.join(cfg["steam_root"], "appcache", "librarycache", str(appid))
+    )
+    if not os.path.isdir(base):
+        return None
+    try:
+        entries = os.listdir(base)
+    except OSError:
+        return None
+
+    for entry in entries:
+        full = os.path.join(base, entry)
+        if os.path.isdir(full):
+            for name in _LOCAL_WIDE_NAMES:
+                nested = os.path.join(full, name)
+                if os.path.exists(nested) and os.path.getsize(nested) > 2048:
+                    return nested
+        elif entry in _LOCAL_WIDE_NAMES and os.path.getsize(full) > 2048:
+            return full
+    return None
+
+
 def _extract_icon(exe_path, dest_png):
+    """Write the executable's icon to `dest_png`, as large as it can be had.
+
+    The PE resource directory usually holds a 256px icon; PowerShell's
+    ExtractAssociatedIcon is capped at 32px, so it is only the fallback for binaries
+    with no icon resource of their own.
+    """
+    if peicon.write_largest_icon(exe_path, dest_png):
+        return True
+
     script = (
         "Add-Type -AssemblyName System.Drawing; "
         f"$i=[System.Drawing.Icon]::ExtractAssociatedIcon('{winpath.windows(exe_path)}'); "
@@ -271,21 +325,323 @@ def _extract_icon(exe_path, dest_png):
     return os.path.exists(dest_png) and os.path.getsize(dest_png) > 200
 
 
+# -- SteamGridDB ---------------------------------------------------------
+
+_sgdb_offline = False
+
+
+def _sgdb_get(url, key):
+    """GET a SteamGridDB endpoint. Returns the `data` payload, or None."""
+    global _sgdb_offline
+    if _sgdb_offline:
+        return None
+    headers = dict(_UA)
+    headers["Authorization"] = f"Bearer {key}"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            print("[art] SteamGridDB rejected the key; disabling for this run")
+            _sgdb_offline = True
+        return None
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        # A DNS failure means the host is unreachable from here; stop retrying it for
+        # every remaining game rather than paying the timeout 300 times.
+        print(f"[art] SteamGridDB unreachable ({exc}); disabling for this run")
+        _sgdb_offline = True
+        return None
+    return payload.get("data") if isinstance(payload, dict) else None
+
+
+def _steamgriddb_cover(game, cfg, dest):
+    key = (cfg.get("steamgriddb_key") or "").strip()
+    if not key:
+        return False
+
+    gid = None
+    appid = game.get("steam_appid")
+    if appid:
+        found = _sgdb_get(_SGDB_BY_STEAM.format(appid=appid), key)
+        if isinstance(found, dict):
+            gid = found.get("id")
+
+    if not gid:
+        term = urllib.parse.quote(game["name"])
+        results = _sgdb_get(_SGDB_SEARCH.format(term=term), key) or []
+        for item in results:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            # Same guard as the Steam name search: an unrelated top hit is worse
+            # than no art at all.
+            if _similar(game["name"], item.get("name") or "") >= _MATCH_CUTOFF:
+                gid = item["id"]
+                break
+
+    if not gid:
+        return False
+
+    grids = _sgdb_get(_SGDB_GRIDS.format(gid=gid), key) or []
+    for grid in grids:
+        url = isinstance(grid, dict) and grid.get("url")
+        if url and _download(url, dest):
+            return True
+    return False
+
+
+def _package_logo(install_dir):
+    """The logo a Store/Xbox package ships with, as PNG bytes.
+
+    Xbox titles have no exe of their own to take an icon from — the launch value is an
+    AUMID — but every package carries its own tile artwork next to the manifest.
+    """
+    if not install_dir:
+        return None
+    root = winpath.native(install_dir)
+    best, best_area = None, 0
+    for folder in (root, os.path.join(root, "Content")):
+        try:
+            entries = os.listdir(folder)
+        except OSError:
+            continue
+        for entry in entries:
+            low = entry.lower()
+            if not low.endswith(".png") or "logo" not in low:
+                continue
+            # Skip the high-contrast accessibility variants; they are flat silhouettes.
+            if "contrast-" in low:
+                continue
+            path = os.path.join(folder, entry)
+            try:
+                with open(path, "rb") as fh:
+                    head = fh.read(24)
+                if head[:8] != b"\x89PNG\r\n\x1a\n":
+                    continue
+                width, height = struct.unpack(">II", head[16:24])
+            except (OSError, struct.error):
+                continue
+            # Tile art is square-ish; a wide splash screen makes a poor centrepiece.
+            if not height or not 0.7 <= width / height <= 1.4:
+                continue
+            if width * height > best_area:
+                best_area, best = width * height, path
+
+    if not best or best_area < 64 * 64:
+        return None
+    try:
+        with open(best, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+# -- generated cover card ------------------------------------------------
+
+
+def _dominant_color(png_bytes):
+    """A representative colour for an icon: the most common vivid tone in it."""
+    decoded = peicon.decode_png_rgba(png_bytes)
+    if not decoded:
+        return None
+    _w, _h, rgba = decoded
+
+    buckets = {}
+    fallback = [0, 0, 0, 0]
+    for i in range(0, len(rgba), 4):
+        r, g, b, a = rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]
+        if a < 128:
+            continue
+        fallback[0] += r
+        fallback[1] += g
+        fallback[2] += b
+        fallback[3] += 1
+        hi, lo = max(r, g, b), min(r, g, b)
+        # Weight by how much colour a pixel actually carries, so a logo's accent wins
+        # over the large flat black or white area around it.
+        weight = 1 + (hi - lo) * 3
+        if hi < 26 or lo > 235:
+            weight = 1
+        key = (r >> 4, g >> 4, b >> 4)
+        slot = buckets.setdefault(key, [0, 0, 0, 0])
+        slot[0] += r * weight
+        slot[1] += g * weight
+        slot[2] += b * weight
+        slot[3] += weight
+
+    if not fallback[3]:
+        return None
+    if buckets:
+        best = max(buckets.values(), key=lambda s: s[3])
+        return (best[0] // best[3], best[1] // best[3], best[2] // best[3])
+    return (fallback[0] // fallback[3], fallback[1] // fallback[3],
+            fallback[2] // fallback[3])
+
+
+def _shade(rgb, factor, floor=0):
+    return tuple(max(floor, min(255, int(c * factor))) for c in rgb)
+
+
+def _normalize(rgb):
+    """Pull a colour into a mid range so the card is neither black nor washed out.
+
+    Plenty of icons are dominated by near-black (CurseForge) or near-white (MECCH
+    CHAMELEON); shading those directly gives a flat grey card.
+    """
+    lum = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+    if lum < 1:
+        return (58, 62, 74)  # a neutral slate, for a wholly black icon
+    if lum < 70:
+        return _shade(rgb, 70 / lum)
+    if lum > 190:
+        return _shade(rgb, 190 / lum)
+    return rgb
+
+
+def _card_svg(png_bytes):
+    """A full-bleed 2:3 cover built around an icon, tinted to match it.
+
+    Deliberately carries no title: the tile already prints the game's name underneath,
+    and a wordmark here just says it twice.
+    """
+    rgb = _dominant_color(png_bytes)
+    if rgb is None:
+        return None
+    rgb = _normalize(rgb)
+
+    # Keep the ground dark enough that the white tile text stays readable.
+    top = _shade(rgb, 0.55)
+    bottom = _shade(rgb, 0.20)
+    glow = _shade(rgb, 1.15, floor=40)
+
+    icon = base64.b64encode(png_bytes).decode("ascii")
+
+    return (
+        # An explicit width/height matters: with only a viewBox the image has no
+        # intrinsic size, and the tile's "is this a tiny icon?" test reads a bogus
+        # naturalWidth and shrinks the card into the middle of its own tile.
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
+        f'width="600" height="900" viewBox="0 0 600 900">'
+        f'<defs>'
+        f'<linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'
+        f'<stop offset="0%" stop-color="rgb{top}"/>'
+        f'<stop offset="100%" stop-color="rgb{bottom}"/>'
+        f'</linearGradient>'
+        f'<radialGradient id="glow" cx="50%" cy="42%" r="52%">'
+        f'<stop offset="0%" stop-color="rgb{glow}" stop-opacity=".55"/>'
+        f'<stop offset="100%" stop-color="rgb{glow}" stop-opacity="0"/>'
+        f'</radialGradient>'
+        f'</defs>'
+        f'<rect width="600" height="900" fill="url(#g)"/>'
+        f'<rect width="600" height="900" fill="url(#glow)"/>'
+        # Sits a little above centre so it stays clear of the tile's name overlay.
+        f'<image x="110" y="188" width="380" height="380" '
+        f'xlink:href="data:image/png;base64,{icon}"/>'
+        f'</svg>'
+    ).encode("utf-8")
+
+
 # -- public --------------------------------------------------------------
+
+
+def _wide_card_svg(name, image_path):
+    """Letterbox a landscape banner onto a 2:3 card.
+
+    Some titles only ever have a wide header — brand new releases, mostly. Cropping one
+    into the tile keeps about a third of it, so band it across a tinted ground instead.
+    The tint comes from the name rather than the image, since the banner is a JPEG and
+    decoding it here would need a second decoder for no real gain.
+    """
+    try:
+        with open(image_path, "rb") as fh:
+            payload = fh.read()
+    except OSError:
+        return None
+    if len(payload) < 2048:
+        return None
+
+    digest = hashlib.md5((name or "?").encode("utf-8")).hexdigest()
+    hue = int(digest[:4], 16) % 360
+    banner = base64.b64encode(payload).decode("ascii")
+    mime = "png" if payload[:8] == b"\x89PNG\r\n\x1a\n" else "jpeg"
+
+    # 460x215 is Steam's header shape; 600 wide keeps that ratio at 280 tall.
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" '
+        f'width="600" height="900" viewBox="0 0 600 900">'
+        f'<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'
+        f'<stop offset="0%" stop-color="hsl({hue},34%,30%)"/>'
+        f'<stop offset="100%" stop-color="hsl({(hue + 40) % 360},38%,14%)"/>'
+        f"</linearGradient></defs>"
+        f'<rect width="600" height="900" fill="url(#g)"/>'
+        f'<image x="0" y="310" width="600" height="280" '
+        f'xlink:href="data:image/{mime};base64,{banner}"/>'
+        f"</svg>"
+    ).encode("utf-8")
+
+
+def _write_card(png_bytes, dest):
+    """Render a cover card from icon bytes. False when they could not be decoded."""
+    if not png_bytes:
+        return False
+    svg = _card_svg(png_bytes)
+    if not svg:
+        return False
+    with open(dest, "wb") as fh:
+        fh.write(svg)
+    return True
+
+
+def _paths(game_id):
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", game_id)
+    join = lambda ext: os.path.join(config.ART_DIR, safe + ext)  # noqa: E731
+    return join(".jpg"), join(".png"), join(".card.svg"), join(".miss")
+
+
+def cache_state(game):
+    """(kind, version) for art already on disk, without resolving anything.
+
+    Called for every game on every /api/games, so it must never touch the network.
+    `kind` is None when nothing is cached yet and the client should wait and see what
+    /api/art actually returns. `version` busts the browser cache when art changes.
+    """
+    jpg, png, card, miss = _paths(game["id"])
+    newest = 0
+    for path in (jpg, png, card, miss):
+        try:
+            newest = max(newest, int(os.path.getmtime(path)))
+        except OSError:
+            pass
+
+    if game.get("art_override"):
+        kind = "cover"
+    elif os.path.exists(jpg):
+        kind = "cover"
+    elif os.path.exists(card):
+        kind = "card"
+    elif os.path.exists(png):
+        # The .png is the raw icon a card gets built from, not something served on its
+        # own. Claiming "icon" here would style the tile for a 32px icon and then get a
+        # full-size card, so say nothing and let the image settle it once it loads.
+        kind = None
+    elif os.path.exists(miss) and time.time() - os.path.getmtime(miss) < 86400:
+        kind = "placeholder"
+    else:
+        kind = None
+    return kind, newest
 
 
 def resolve(game, cfg):
     """Return (path, kind) for a game's art, or (None, 'placeholder')."""
     config.ensure_dirs()
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", game["id"])
-    jpg = os.path.join(config.ART_DIR, safe + ".jpg")
-    png = os.path.join(config.ART_DIR, safe + ".png")
-    miss = os.path.join(config.ART_DIR, safe + ".miss")
+    jpg, png, card, miss = _paths(game["id"])
 
     if os.path.exists(jpg):
         return jpg, "cover"
-    if os.path.exists(png):
-        return png, "icon"
+    if os.path.exists(card):
+        return card, "card"
 
     override = game.get("art_override")
     if override and os.path.exists(winpath.native(override)):
@@ -302,23 +658,53 @@ def resolve(game, cfg):
         if local:
             return local, "cover"
 
-    # 2/3. CDN, by known appid or by name match.
+    # 2. Art the source itself handed us. Epic's catalog carries real portrait store
+    # art, which is authoritative in a way a fuzzy Steam name match never is.
+    supplied = game.get("art_url")
+    if supplied and _download(supplied, jpg):
+        return jpg, "cover"
+
+    # 3/4. CDN, by known appid or by name match.
     if not appid:
         appid = guess_appid(game["name"])
         if appid:
             game["steam_appid"] = appid  # surfaced in the UI so a bad guess is fixable
 
-    if appid:
-        for url in (_CDN.format(appid=appid), _CDN_ALT.format(appid=appid)):
-            if _download(url, jpg):
-                return jpg, "cover"
+    if appid and _download(_CDN.format(appid=appid), jpg):
+        return jpg, "cover"
 
-    # 4. The executable's own icon.
+    # 4b. SteamGridDB, which covers what Steam has no appid for at all.
+    if _steamgriddb_cover(game, cfg, jpg):
+        return jpg, "cover"
+
+    # 5. A landscape header is better letterboxed than lost.
+    if appid:
+        wide = _local_steam_wide(cfg, appid)
+        if wide:
+            svg = _wide_card_svg(game["name"], wide)
+            if svg:
+                with open(card, "wb") as fh:
+                    fh.write(svg)
+                return card, "card"
+
+    # 6. Build a cover from artwork the game already ships.
     exe = game.get("exe_path")
     if exe and winpath.exists(exe) and _extract_icon(exe, png):
-        return png, "icon"
+        try:
+            with open(png, "rb") as fh:
+                source = fh.read()
+        except OSError:
+            source = None
+        if _write_card(source, card):
+            return card, "card"
+        if source:
+            return png, "icon"  # the icon exists but would not decode; better than none
 
-    # 5. Nothing worked; remember that for a day so we do not retry on every load.
+    # Store and Xbox packages have no exe to read, but do carry their own tile art.
+    if _write_card(_package_logo(game.get("install_dir")), card):
+        return card, "card"
+
+    # 7. Nothing worked; remember that for a day so we do not retry on every load.
     open(miss, "w").close()
     return None, "placeholder"
 
@@ -329,7 +715,8 @@ def placeholder_svg(name):
     hue = int(digest[:4], 16) % 360
     initials = "".join(w[0] for w in re.findall(r"[A-Za-z0-9]+", name or "?")[:2]).upper()
     return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 900">'
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'width="600" height="900" viewBox="0 0 600 900">'
         f'<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'
         f'<stop offset="0%" stop-color="hsl({hue},38%,32%)"/>'
         f'<stop offset="100%" stop-color="hsl({(hue + 40) % 360},42%,16%)"/>'
