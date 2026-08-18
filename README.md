@@ -40,6 +40,9 @@ plain tab in Firefox (simpler, but you lose the dedicated taskbar button).
 ## Use
 
 - **Click a cover** to launch.
+- **Installed / All** switches between what is on this PC and your whole library.
+  Games you own but have not installed appear dimmed under **All**; clicking one asks
+  first, then hands the download to its launcher.
 - **`/`** focuses search. Type to filter instantly.
 - **Source chips** filter by Steam / Epic / folder / etc.
 - **Sort** by name, last played, playtime, or size on disk.
@@ -58,7 +61,55 @@ plain tab in Firefox (simpler, but you lose the dedicated taskbar button).
 | Riot | `RiotClientServices.exe --launch-product=…` |
 | Folders | `config.json` → `scan_roots`, using the executable heuristic below |
 | Shortcuts | Start Menu `.lnk`/`.url`, conservatively filtered, runs last |
+| Steam (owned) | `GetOwnedGames` with an API key, else the appids Steam has cached art for |
+| Epic (owned) | The account's library service, after `py epicauth.py` |
 
+### Games you do not have installed
+
+Off by default only in the sense that they are hidden until you switch to **All**. Set
+`"include_owned": false` in `config.json` to stop collecting them altogether.
+
+**Steam.** Put a free key from [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey)
+and your 64-bit SteamID in `config.json`:
+
+```json
+{ "steam_api_key": "…", "steam_id": "76561198…" }
+```
+
+That is the only source that truly knows what the account owns. It also needs Steam
+privacy set to **Game details: Public**. Without a key the library is inferred from the
+appids Steam has cached artwork for, which works but drags in DLC and delisted apps —
+each candidate is checked against the store and only real games are kept, so the first
+scan after enabling it is slow and the verdicts are cached in `data/steam_apptypes.json`.
+
+**Epic.** Epic keeps no offline record of what you own, so it needs a one-time sign-in:
+
+```bat
+py epicauth.py
+```
+
+It prints a login URL and asks for the `authorizationCode` shown afterwards. Tokens live
+in `data/epic_auth.json` and refresh themselves; when the refresh token finally lapses,
+run it again.
+
+**Everything else.** Xbox/Game Pass, Battle.net, Riot, Rockstar and EA expose no
+ownership API that can be read without per-launcher OAuth, so they are listed by hand in
+`data/overrides.json`:
+
+```json
+{
+  "owned_games": [
+    { "id": "xbox:forza-horizon-5",
+      "name": "Forza Horizon 5",
+      "source": "xbox",
+      "install_url": "ms-windows-store://pdp/?productid=9NKX70BBCDRN" }
+  ]
+}
+```
+
+`install_url` is whatever protocol link the launcher uses — `steam://install/<appid>`,
+`com.epicgames.launcher://apps/<id>?action=install`, `battlenet://<code>`,
+`ms-windows-store://pdp/?productid=<id>`.
 ### The executable heuristic
 
 A folder counts as a game **only if a plausible executable is found in it**. Redistributables,
@@ -76,10 +127,18 @@ bury the binary at `…\Gameface\Binaries\Win64\`.
    hash-subdirectory layout
 2. Steam CDN by appid
 3. For non-Steam games: name → appid via Steam's community search, then the CDN
-4. The executable's embedded icon (shown centred, not stretched)
-5. A generated lettered placeholder
+4. SteamGridDB, if `steamgriddb_key` is set — this is what finds covers for the things
+   Steam has no app ID for at all: Epic and Riot titles, launchers, mod clients
+5. A cover generated here from the game's own artwork — the 256px icon in the
+   executable, or the tile art an Xbox/Store package ships — centred on a gradient
+   sampled from that icon, so it fills the tile like a real cover
+6. A generated lettered placeholder
 
 A bad name match is fixable: right-click → **Fix cover art** → set the Steam app ID.
+
+Icons come out of the executable's PE resource directory (`peicon.py`). PowerShell's
+`ExtractAssociatedIcon` is capped at 32×32, which is far too small to build a cover
+from; it is only the fallback for binaries carrying no icon resource.
 
 ## Fixing what it gets wrong
 
@@ -129,15 +188,19 @@ dashboard.pyw   entry point (pythonw: no console window)
 install.py      icon + shortcuts
 server.py       HTTP server, 127.0.0.1 only
 scan.py         runs scanners, merges, dedupes, applies overrides
-scanners/       steam, epic, xbox, riot, folders, shortcuts
+scanners/       steam, epic, xbox, riot, folders, shortcuts,
+                owned_steam, owned_epic
 exefind.py      the executable heuristic
 art.py          cover art resolution
+peicon.py       largest icon out of a PE binary, and PNG encode/decode
+epicauth.py     one-time Epic sign-in (py epicauth.py)
 playtime.py     session tracking
 vdf.py          Valve KeyValues parser
 winpath.py      Windows/WSL path translation (lets the scanners be tested from WSL)
 winshell.py     PowerShell bridge (.lnk targets, AUMIDs, icon rendering)
 web/            index.html, app.js, style.css, favicon.ico
-data/           library.json, overrides.json, playtime.json, art/  (generated)
+data/           library.json, overrides.json, playtime.json, art/,
+                epic_auth.json, steam_apptypes.json  (generated)
 ```
 
 ## Security
