@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 
 import winpath
 
@@ -41,6 +42,17 @@ DEFAULTS = {
         "Medal", "Radeon ReLive", "Captures", "Clips", "Recordings",
         "replay_cache", "thumb_cache", "New folder",
     ],
+    # Pull in games you own but have not installed. They show up only under the
+    # dashboard's "All" view, and clicking one hands the download to its launcher.
+    "include_owned": True,
+    # Owned Steam games come from the Web API when these two are set (free key from
+    # steamcommunity.com/dev/apikey). Without them the library is inferred from Steam's
+    # own on-disk cache, which is workable but noisier.
+    "steam_api_key": "",
+    "steam_id": "",
+    # Free key from steamgriddb.com/profile/preferences/api — supplies portrait covers
+    # for everything Steam has no app ID for (Epic/Riot titles, launchers, mod clients).
+    "steamgriddb_key": "",
     "steam_root": "C:\\Program Files (x86)\\Steam",
     "epic_manifests": "C:\\ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests",
     "xbox_games": "C:\\XboxGames",
@@ -75,6 +87,20 @@ def write_json(path, payload):
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
+
+
+def safe_console():
+    """Stop a non-ASCII game name from killing a console run.
+
+    The Windows console is cp1252 by default, and the owned-library scanners surface
+    titles it cannot encode (CJK names, typographic quotes). Without this, printing the
+    scan table raises UnicodeEncodeError and takes the whole run with it.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass  # not a real console (pythonw, a pipe); nothing to protect
 
 
 def ensure_dirs():

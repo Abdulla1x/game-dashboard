@@ -6,6 +6,14 @@
   "window_size": "1400,900",
   "playtime_poll_seconds": 15,
 
+  "_owned": "Games you own but have not installed. They appear only under the All view.",
+  "include_owned": true,
+  "steam_api_key": "",
+  "steam_id": "",
+
+  "_art": "Free key from steamgriddb.com/profile/preferences/api — covers for non-Steam games.",
+  "steamgriddb_key": "",
+
   "scan_roots": [
     "E:\\Games",
     "D:\\Games",

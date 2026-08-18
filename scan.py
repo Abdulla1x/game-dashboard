@@ -8,7 +8,8 @@ import time
 
 import config
 import winpath
-from scanners import epic, folders, riot, shortcuts, steam, xbox
+from scanners import (epic, folders, owned_epic, owned_steam, riot, shortcuts,
+                      steam, xbox)
 
 # shortcuts runs last: it only fills gaps the others left.
 SCANNERS = [
@@ -17,6 +18,13 @@ SCANNERS = [
     ("xbox", xbox),
     ("riot", riot),
     ("folders", folders),
+]
+
+# Owned-but-not-installed libraries. These run after everything on disk has been claimed,
+# so an owned record can never displace the installed copy of the same game.
+OWNED_SCANNERS = [
+    ("owned-steam", owned_steam),
+    ("owned-epic", owned_epic),
 ]
 
 
@@ -60,7 +68,51 @@ def collect(cfg, verbose=False):
     games.extend(kept)
     print(f"[scan] {'shortcuts':9s} {len(kept):3d} games  ({time.time() - start:.1f}s)")
 
+    # Everything found so far is on disk.
+    for record in games:
+        record.setdefault("installed", True)
+
+    games.extend(_collect_owned(cfg, games, verbose))
     return games
+
+
+def _collect_owned(cfg, installed, verbose):
+    """Owned-library records for games that are not already installed."""
+    if not cfg.get("include_owned", True):
+        return []
+
+    claimed_appids = {g["steam_appid"] for g in installed if g.get("steam_appid")}
+    claimed_ids = {g["id"].lower() for g in installed}
+    claimed_names = {_NAME_KEY.sub("", g["name"].lower()) for g in installed}
+
+    out = []
+    for label, module in OWNED_SCANNERS:
+        start = time.time()
+        try:
+            found = module.scan(cfg)
+        except Exception as exc:  # an owned library is a bonus, never a hard failure
+            print(f"[scan] {label} failed: {exc}")
+            found = []
+
+        kept = []
+        for record in found:
+            record["installed"] = False
+            name_key = _NAME_KEY.sub("", record["name"].lower())
+            appid = record.get("steam_appid")
+            if (appid and appid in claimed_appids) or \
+               record["id"].lower() in claimed_ids or name_key in claimed_names:
+                if verbose:
+                    print(f"[scan]   owned-dedup {record['name']} ({label})")
+                continue
+            claimed_ids.add(record["id"].lower())
+            claimed_names.add(name_key)
+            if appid:
+                claimed_appids.add(appid)
+            kept.append(record)
+
+        out.extend(kept)
+        print(f"[scan] {label:9s} {len(kept):3d} games  ({time.time() - start:.1f}s)")
+    return out
 
 
 def _is_duplicate(record, claimed_dirs, claimed_exes):
@@ -93,6 +145,12 @@ _SOURCE_RANK = {"steam": 0, "epic": 1, "xbox": 2, "riot": 3, "manual": 4,
 _NAME_KEY = re.compile(r"[^a-z0-9]+")
 
 
+def _merge_rank(game):
+    """Sort key for picking a winner: on disk first, then by source quality."""
+    return (not game.get("installed", True),
+            _SOURCE_RANK.get(game["source"], 9))
+
+
 def dedupe_by_name(games, verbose=False):
     """Collapse records that are plainly the same game seen from two sources."""
     best = {}
@@ -104,7 +162,8 @@ def dedupe_by_name(games, verbose=False):
         if current is None:
             best[key] = game
             continue
-        if _SOURCE_RANK.get(game["source"], 9) < _SOURCE_RANK.get(current["source"], 9):
+        # A game you have on disk always wins over the same title merely owned.
+        if _merge_rank(game) < _merge_rank(current):
             best[key] = game
             loser = current
         else:
@@ -122,6 +181,15 @@ def apply_overrides(games, overrides):
     for extra in overrides.get("extra_games", []):
         if extra.get("id") and extra["id"] not in by_id:
             record = _blank_record(extra)
+            games.append(record)
+            by_id[record["id"]] = record
+
+    # Xbox, Battle.net, Riot, Rockstar and EA expose no ownership API we can read, so
+    # anything from those libraries is listed by hand here and treated like any other
+    # owned-but-not-installed game.
+    for owned in overrides.get("owned_games", []):
+        if owned.get("id") and owned["id"] not in by_id:
+            record = _blank_owned_record(owned)
             games.append(record)
             by_id[record["id"]] = record
 
@@ -149,12 +217,32 @@ def apply_overrides(games, overrides):
     return out
 
 
+def _blank_owned_record(owned):
+    """A hand-listed game from a library we cannot query."""
+    url = owned.get("install_url") or owned.get("url")
+    return {
+        "id": owned["id"],
+        "name": owned.get("name") or owned["id"],
+        "source": owned.get("source", "manual"),
+        "installed": False,
+        "install_dir": None,
+        "launch": ({"kind": "url", "value": url} if url
+                   else {"kind": "none", "value": None}),
+        "exe_name": None,
+        "exe_path": None,
+        "size_bytes": 0,
+        "last_played": None,
+        "steam_appid": owned.get("steam_appid"),
+    }
+
+
 def _blank_record(extra):
     exe = extra.get("exe")
     return {
         "id": extra["id"],
         "name": extra.get("name") or extra["id"],
         "source": extra.get("source", "manual"),
+        "installed": True,
         "install_dir": extra.get("install_dir") or (winpath.dirname(exe) if exe else None),
         "launch": {"kind": "exe", "value": exe} if exe else {"kind": "none", "value": None},
         "exe_name": winpath.basename(exe) if exe else None,
@@ -183,7 +271,8 @@ def run(verbose=False, write=True):
 def _print_table(games):
     by_source = {}
     for g in games:
-        by_source.setdefault(g["source"], []).append(g)
+        label = g["source"] if g.get("installed", True) else f"{g['source']} (owned)"
+        by_source.setdefault(label, []).append(g)
 
     for source in sorted(by_source):
         rows = sorted(by_source[source], key=lambda g: g["name"].lower())
@@ -210,9 +299,25 @@ def _selftest(games):
     if stray and stray.get("exe_name", "").lower().startswith("unins"):
         failures.append("Stray resolved to the uninstaller")
 
-    steam_games = [g for g in games if g["source"] == "steam"]
+    installed = [g for g in games if g.get("installed", True)]
+    owned = [g for g in games if not g.get("installed", True)]
+
+    steam_games = [g for g in installed if g["source"] == "steam"]
     if len(steam_games) < 15:
-        failures.append(f"expected >=15 Steam games, got {len(steam_games)}")
+        failures.append(f"expected >=15 installed Steam games, got {len(steam_games)}")
+
+    # The owned library is additive: it must never eat into what is on disk.
+    if len(installed) < 60:
+        failures.append(f"expected >=60 installed games, got {len(installed)}")
+
+    installed_appids = {g["steam_appid"] for g in installed if g.get("steam_appid")}
+    for g in owned:
+        if g.get("steam_appid") and g["steam_appid"] in installed_appids:
+            failures.append(f"owned duplicate of an installed game: {g['name']}")
+        if g.get("install_dir"):
+            failures.append(f"{g['name']}: not installed but has an install_dir")
+        if not g["launch"].get("value"):
+            failures.append(f"{g['name']}: owned record has no install command")
 
     seen_names = {}
     for g in games:
@@ -226,6 +331,8 @@ def _selftest(games):
     for g in games:
         if not g.get("id") or not g.get("name"):
             failures.append(f"record missing id/name: {g}")
+        if "installed" not in g:
+            failures.append(f"{g['name']}: record has no installed flag")
         if g["launch"]["kind"] != "none" and not g["launch"].get("value"):
             failures.append(f"{g['name']}: launch kind {g['launch']['kind']} has no value")
 
@@ -235,11 +342,13 @@ def _selftest(games):
             print(f"FAIL  {f}")
         print(f"\n{len(failures)} check(s) failed")
         return 1
-    print(f"PASS  {len(games)} games, all checks green")
+    print(f"PASS  {len(games)} games ({len(installed)} installed, "
+          f"{len(owned)} owned), all checks green")
     return 0
 
 
 def main():
+    config.safe_console()
     ap = argparse.ArgumentParser(description="Scan the game library.")
     ap.add_argument("--dry-run", action="store_true", help="print results, do not write")
     ap.add_argument("--selftest", action="store_true", help="assert verification criteria")
@@ -251,7 +360,9 @@ def main():
 
     _print_table(games)
     visible = [g for g in games if not g.get("hidden")]
-    print(f"\nTotal: {len(games)} ({len(visible)} visible)")
+    on_disk = [g for g in games if g.get("installed", True)]
+    print(f"\nTotal: {len(games)} ({len(visible)} visible, {len(on_disk)} installed, "
+          f"{len(games) - len(on_disk)} owned)")
 
     if args.selftest:
         return _selftest(games)
