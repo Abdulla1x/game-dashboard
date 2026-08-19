@@ -68,7 +68,10 @@ function signature(games) {
            `\u0001${g.hidden ? 1 : 0}` +
            `\u0001${g.installed === false ? 0 : 1}\u0001${g.playtime_seconds || 0}` +
            `\u0001${g.last_played || 0}\u0001${g.size_bytes || 0}` +
-           `\u0001${g.art_version || 0}\u0001${g.art_kind || ""}\u0002`;
+           `\u0001${g.art_version || 0}\u0001${g.art_kind || ""}` +
+           // The count is enough: the pill shows a number, and a companion's *name*
+           // lives on its own record, which is already in this string.
+           `\u0001${(g.companions || []).length}\u0002`;
   }
   return out;
 }
@@ -281,6 +284,8 @@ function updateCard(el, game) {
   } else if (game.playtime_seconds) {
     bits.push(fmtPlaytime(game.playtime_seconds));
   }
+  const mates = (game.companions || []).length;
+  if (mates) bits.push(`+${mates} app${mates === 1 ? "" : "s"}`);
   const meta = bits.join(" · ");
   if (el._meta.textContent !== meta) el._meta.textContent = meta;
 }
@@ -346,8 +351,15 @@ async function start(game, message) {
   state.busy.add(game.id);
   render();
   try {
-    await api("/api/launch", { method: "POST", body: JSON.stringify({ id: game.id }) });
-    toast(message);
+    const res = await api("/api/launch",
+                          { method: "POST", body: JSON.stringify({ id: game.id }) });
+    const also = res.also || [];
+    const failed = res.failed || [];
+    // One toast, not three: #toast is a single element, so a second call stomps the
+    // first. The game itself started either way -- only the companions can be partial.
+    if (failed.length) toast(`${message} — ${failed.join("; ")}`, true);
+    else if (also.length) toast(`${message} + ${also.join(", ")}`);
+    else toast(message);
   } catch (err) {
     toast(`${game.name}: ${err.message}`, true);
   } finally {
@@ -357,12 +369,9 @@ async function start(game, message) {
 
 function confirmInstall(game) {
   openModal(`Install ${game.name}?`, (body) => {
-    const note = document.createElement("p");
-    note.style.cssText = "margin:0;color:var(--muted);font-size:13px;line-height:1.5";
-    note.textContent =
+    note(body,
       `${game.name} is in your library but not installed. This hands the download to ` +
-      `${SOURCE_LABEL[game.source] || game.source}, which will ask you where to put it.`;
-    body.appendChild(note);
+      `${SOURCE_LABEL[game.source] || game.source}, which will ask you where to put it.`);
   }, () => start(game, `Installing ${game.name}`), "Install");
 }
 
@@ -396,12 +405,19 @@ function openMenu(game, x, y) {
       } catch (err) { toast(err.message, true); }
     });
   }
+  if (installed) add("Launch with\u2026", () => companionsDialog(game));
   menu.appendChild(document.createElement("hr"));
-  add("Rename\u2026", () => renameDialog(game));
+  // For an app you added, Edit is a superset of Rename -- and two ways to set the name,
+  // writing to two different places, is how "renaming did nothing" bugs happen.
+  if (game.user_added) add("Edit\u2026", () => appDialog(game));
+  else add("Rename\u2026", () => renameDialog(game));
   if (installed && game.install_dir) add("Pick executable\u2026", () => exeDialog(game));
   add("Fix cover art\u2026", () => artDialog(game));
   menu.appendChild(document.createElement("hr"));
   add(game.hidden ? "Unhide" : "Hide", () => override(game.id, { hidden: !game.hidden }));
+  // Removal is only offered for entries the user created; everything else would just
+  // come back on the next rescan, which is what Hide is for.
+  if (game.user_added) add("Remove\u2026", () => removeDialog(game));
 
   menu.hidden = false;
   const r = menu.getBoundingClientRect();
@@ -419,15 +435,21 @@ document.addEventListener("scroll", closeMenu, true);
 const modal = $("modal");
 let onSave = null;
 
-function openModal(title, buildBody, save, saveLabel) {
+function openModal(title, buildBody, save, saveLabel, danger) {
   $("modal-title").textContent = title;
   $("modal-save").textContent = saveLabel || "Save";
+  // Both of these toggle in *both* directions on purpose: the button is shared, so a
+  // one-way add would leave the next dialog red, or disabled, for no reason.
+  $("modal-save").classList.toggle("danger", !!danger);
+  $("modal-save").disabled = false;
   const body = $("modal-body");
   body.textContent = "";
   buildBody(body);
   onSave = save;
   modal.hidden = false;
-  const first = body.querySelector("input");
+  // An "add a row" box is not what a dialog is about, so it never takes opening focus
+  // -- otherwise Settings would open with the cursor in the folder adder.
+  const first = body.querySelector("input:not([data-nofocus])");
   if (first) {
     first.focus();
     // select() is only meaningful on a text field, and throws on a checkbox.
@@ -463,6 +485,23 @@ function field(parent, labelText, value, placeholder) {
   return input;
 }
 
+/* Three dialogs each carried their own copy of this paragraph as an inline style, and
+   the settings panel had its own local section(). Both belong beside field/checkbox. */
+function note(parent, text) {
+  const p = document.createElement("p");
+  p.className = "note";
+  p.textContent = text;
+  parent.appendChild(p);
+  return p;
+}
+
+function section(parent, title, hint) {
+  const h = document.createElement("h3");
+  h.textContent = title;
+  parent.appendChild(h);
+  return hint ? note(parent, hint) : null;
+}
+
 function renameDialog(game) {
   let input;
   openModal(`Rename ${game.name}`,
@@ -473,11 +512,8 @@ function renameDialog(game) {
 function artDialog(game) {
   let appid, path;
   openModal(`Cover art — ${game.name}`, (body) => {
-    const note = document.createElement("p");
-    note.style.cssText = "margin:0 0 14px;color:var(--muted);font-size:13px";
-    note.textContent = "Art is matched against Steam by name. Set the Steam app ID to " +
-      "correct a bad match, or point at a local image file.";
-    body.appendChild(note);
+    note(body, "Art is matched against Steam by name. Set the Steam app ID to " +
+               "correct a bad match, or point at a local image file.");
     appid = field(body, "Steam app ID", game.steam_appid || "", "e.g. 1245620");
     path = field(body, "Or image file path", game.art_override || "",
                  "C:\\path\\to\\cover.jpg");
@@ -499,10 +535,7 @@ async function exeDialog(game) {
   }
 
   openModal(`Executable — ${game.name}`, (body) => {
-    const note = document.createElement("p");
-    note.style.cssText = "margin:0 0 12px;color:var(--muted);font-size:13px";
-    note.textContent = `${data.candidates.length} candidate(s) found, best first.`;
-    body.appendChild(note);
+    note(body, `${data.candidates.length} candidate(s) found, best first.`);
 
     for (const cand of data.candidates) {
       const btn = document.createElement("button");
@@ -523,18 +556,141 @@ async function exeDialog(game) {
   }, () => override(game.id, { exe: manual.value.trim() }));
 }
 
+/* ---------- adding an app by hand ---------- */
+
+/* Re-quote anything with a space so the field round-trips through the server's splitter. */
+function joinArgs(args) {
+  return (args || []).map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ");
+}
+
+/* `game` null = add. Everything the edit form needs is already in /api/games, so there
+   is no GET to make first. */
+function appDialog(game) {
+  const editing = !!game;
+  let name, target, args, visible;
+
+  openModal(editing ? `Edit — ${game.name}` : "Add a game or app", (body) => {
+    note(body, "A path to a .exe, or a .lnk / .url shortcut, or a link like " +
+               "steam://rungameid/570 or https://tracker.gg/\u2026");
+    name = field(body, "Name", editing ? game.name : "", "Game or app name");
+    target = field(body, "Target", editing ? (game.launch || {}).value : "",
+                   "D:\\Games\\Thing\\Thing.exe");
+    args = field(body, "Arguments", editing ? joinArgs((game.launch || {}).args) : "",
+                 "optional");
+    visible = checkbox(body, "Show in library", !(editing && game.hidden));
+  }, async () => {
+    const res = await api("/api/apps", {
+      method: "POST",
+      body: JSON.stringify({
+        id: editing ? game.id : null,
+        name: name.value.trim(),
+        target: target.value.trim(),
+        args: args.value.trim(),
+        visible: visible.checked,
+      }),
+    });
+    for (const warn of res.warnings || []) toast(warn, true);
+    lastSignature = null;
+    await refresh();
+  }, editing ? "Save" : "Add");
+}
+
+function removeDialog(game) {
+  openModal(`Remove ${game.name}?`, (body) => {
+    note(body, "Removes the entry from your library. Nothing on disk is touched, and " +
+               "adding it again under the same name brings its playtime back.");
+  }, async () => {
+    await api("/api/apps/remove",
+              { method: "POST", body: JSON.stringify({ id: game.id }) });
+    lastSignature = null;
+    await refresh();
+  }, "Remove", true);
+}
+
+/* ---------- companion apps ---------- */
+
+function companionsDialog(game) {
+  const chosen = new Set(game.companions || []);
+  // Not-installed entries launch an *install* URL. A companion that silently starts a
+  // 100 GB download is not a feature.
+  const pool = state.games.filter((g) => g.id !== game.id && isInstalled(g));
+  // An id can be stored but absent -- a folder id is path-derived, so an offline drive
+  // makes its game vanish. Keep it listed and ticked rather than dropping it on save.
+  const missing = [...chosen].filter((id) => !pool.some((g) => g.id === id));
+  const rows = [];
+
+  openModal(`Launch with — ${game.name}`, (body) => {
+    note(body, `These start alongside ${game.name} when you launch it. Their own ` +
+               `companion apps are not launched.`);
+
+    const searchWrap = document.createElement("div");
+    searchWrap.className = "field";
+    const search = document.createElement("input");
+    search.type = "text";
+    search.placeholder = "Search\u2026";
+    searchWrap.appendChild(search);
+    body.appendChild(searchWrap);
+
+    const list = document.createElement("div");
+    list.className = "folders scroll";
+    body.appendChild(list);
+
+    const add = (id, label, tag, on) => {
+      const row = document.createElement("label");
+      row.className = "folder";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = on;
+      box.addEventListener("change", () => {
+        if (box.checked) chosen.add(id);
+        else chosen.delete(id);
+      });
+      const text = document.createElement("div");
+      text.innerHTML = "<b></b><em></em>";
+      text.querySelector("b").textContent = label;
+      text.querySelector("em").textContent = tag;
+      row.append(box, text);
+      list.appendChild(row);
+      rows.push({ node: row, key: label.toLowerCase() });
+    };
+
+    for (const id of missing) add(id, id, "not in your library right now", true);
+    // Ticked first, so what is already configured is visible without scrolling.
+    const sorted = pool.slice().sort((a, b) =>
+      (chosen.has(b.id) - chosen.has(a.id)) ||
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+    for (const mate of sorted) {
+      // A helper app is usually hidden from the grid, which is exactly the companion
+      // shape -- so hidden entries are offered, and labelled.
+      const tag = [SOURCE_LABEL[mate.source] || mate.source, mate.hidden ? "hidden" : ""]
+        .filter(Boolean).join(" \u00b7 ");
+      add(mate.id, mate.name, tag, chosen.has(mate.id));
+    }
+
+    search.addEventListener("input", () => {
+      const q = search.value.trim().toLowerCase();
+      for (const row of rows) row.node.hidden = !!q && !row.key.includes(q);
+    });
+  }, () => override(game.id, { companions: [...chosen] }));
+}
+
 /* ---------- settings ---------- */
 
 /* Rows of folder paths with a checkbox each: detected candidates come pre-ticked when
    they are already configured, and anything already in the config that detection did
-   not propose is appended so saving never silently drops it. */
+   not propose is appended so saving never silently drops it.
+
+   Rows the user owns -- from their config, or typed into the Add box -- also carry a ✕.
+   Unticking a mistyped path leaves it sitting in the list looking broken, which is not
+   the same thing as deleting it. A detected row has no ✕ on purpose: unticking is
+   already the right "no" there, and detection would propose it again next time. */
 function folderList(parent, configured, detected) {
   const wrap = document.createElement("div");
   wrap.className = "folders";
   parent.appendChild(wrap);
 
   const rows = [];
-  const add = (path, on, note) => {
+  const add = (path, on, label, removable) => {
     if (rows.some((r) => r.path.toLowerCase() === path.toLowerCase())) return;
     const row = document.createElement("label");
     row.className = "folder";
@@ -544,10 +700,29 @@ function folderList(parent, configured, detected) {
     const text = document.createElement("div");
     text.innerHTML = "<b></b><em></em>";
     text.querySelector("b").textContent = path;
-    text.querySelector("em").textContent = note;
+    text.querySelector("em").textContent = label;
     row.append(box, text);
+    const entry = { path, box };
+
+    if (removable) {
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "x";
+      x.textContent = "\u2715";
+      x.title = "Remove this folder";
+      x.addEventListener("click", (ev) => {
+        // The row is a <label> wrapping the checkbox, so without preventDefault the
+        // click is forwarded to it and removing a row would toggle it on the way out.
+        ev.preventDefault();
+        ev.stopPropagation();
+        row.remove();
+        rows.splice(rows.indexOf(entry), 1);
+      });
+      row.appendChild(x);
+    }
+
     wrap.appendChild(row);
-    rows.push({ path, box });
+    rows.push(entry);
   };
 
   for (const cand of detected) {
@@ -555,15 +730,16 @@ function folderList(parent, configured, detected) {
     const where = cand.source === "steam" ? "Steam library — already covered by the Steam scanner"
                 : cand.source === "drive-root" ? "drive root"
                 : "found on disk";
-    add(cand.path, cand.already_configured, `${games} · ${where}`);
+    add(cand.path, cand.already_configured, `${games} · ${where}`, false);
   }
-  for (const path of configured) add(path, true, "in your config");
+  for (const path of configured) add(path, true, "in your config", true);
 
   const adder = document.createElement("div");
   adder.className = "folder-add";
   const input = document.createElement("input");
   input.type = "text";
   input.placeholder = "D:\\Games";
+  input.dataset.nofocus = "1";
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "ghost";
@@ -571,7 +747,7 @@ function folderList(parent, configured, detected) {
   const commit = () => {
     const path = input.value.trim();
     if (!path) return;
-    add(path, true, "added by you");
+    add(path, true, "added by you", true);
     input.value = "";
     wrap.appendChild(adder);
   };
@@ -583,6 +759,66 @@ function folderList(parent, configured, detected) {
   wrap.appendChild(adder);
 
   return () => rows.filter((r) => r.box.checked).map((r) => r.path);
+}
+
+/* extra_game_dirs: one game's own folder, so there is nothing to tick -- a row is either
+   listed or gone. This had no UI before, and `readExtra` echoed the stored value back
+   verbatim on every save, so removing one meant hand-editing config.json. */
+function pathList(parent, paths) {
+  const wrap = document.createElement("div");
+  wrap.className = "folders";
+  parent.appendChild(wrap);
+
+  const rows = [];
+  const adder = document.createElement("div");
+  adder.className = "folder-add";
+  wrap.appendChild(adder);           // appended first, so rows can insert before it
+
+  const add = (path) => {
+    if (rows.some((r) => r.path.toLowerCase() === path.toLowerCase())) return;
+    const row = document.createElement("div");
+    row.className = "folder";
+    const text = document.createElement("div");
+    text.innerHTML = "<b></b>";
+    text.querySelector("b").textContent = path;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "x";
+    x.textContent = "\u2715";
+    x.title = "Remove this folder";
+    const entry = { path };
+    x.addEventListener("click", () => {
+      row.remove();
+      rows.splice(rows.indexOf(entry), 1);
+    });
+    row.append(text, x);
+    wrap.insertBefore(row, adder);
+    rows.push(entry);
+  };
+
+  for (const path of paths) add(path);
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "D:\\Fortnite";
+  input.dataset.nofocus = "1";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ghost";
+  btn.textContent = "Add";
+  const commit = () => {
+    const path = input.value.trim();
+    if (!path) return;
+    add(path);
+    input.value = "";
+  };
+  btn.addEventListener("click", commit);
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); commit(); }
+  });
+  adder.append(input, btn);
+
+  return () => rows.map((r) => r.path);
 }
 
 function secretField(parent, label, info) {
@@ -607,47 +843,43 @@ async function settingsDialog() {
   let apiKey, gridKey, steamId, owned, port, browser;
 
   openModal("Settings", (body) => {
-    const section = (title, hint) => {
-      const h = document.createElement("h3");
-      h.textContent = title;
-      body.appendChild(h);
-      if (hint) {
-        const p = document.createElement("p");
-        p.className = "note";
-        p.textContent = hint;
-        body.appendChild(p);
-      }
-    };
-
-    section("Game folders", "Folders holding one subfolder per game. Detecting\u2026");
+    const hint = section(body, "Game folders",
+                         "Folders holding one subfolder per game. Detecting\u2026");
     const holder = document.createElement("div");
     body.appendChild(holder);
 
-    section("Accounts");
+    section(body, "Individual game folders",
+            "A single game's own folder, when it does not sit inside a scan root above " +
+            "— D:\\Fortnite, not D:\\Games.");
+    // Nothing to detect here, so this reader is live from the moment the dialog opens.
+    readExtra = pathList(body, cfg.extra_game_dirs || []);
+
+    section(body, "Accounts");
     steamId = field(body, "Steam ID (64-bit)", cfg.steam_id || "", "76561198\u2026");
     apiKey = secretField(body, "Steam API key", data.secrets.steam_api_key);
     gridKey = secretField(body, "SteamGridDB key", data.secrets.steamgriddb_key);
     owned = checkbox(body, "Include games I own but have not installed", cfg.include_owned);
 
-    section("App");
+    section(body, "App");
     port = field(body, "Port", String(cfg.port ?? 8777));
     browser = select(body, "Browser", ["chrome", "edge", "default"], cfg.browser || "chrome");
 
     // Detection is a couple of seconds of disk work, so the modal opens first and the
-    // folder list fills in when it lands.
+    // folder list fills in when it lands. Saving before then would post the stored
+    // scan_roots straight back -- which used to be harmless and now would silently undo
+    // a removal, so Save waits.
+    $("modal-save").disabled = true;
     api("/api/detect").then((found) => {
       holder.textContent = "";
       readRoots = folderList(holder, cfg.scan_roots || [], found.candidates || []);
-      const note = body.querySelector(".note");
-      if (note) {
-        note.textContent = found.candidates && found.candidates.length
-          ? "Folders holding one subfolder per game. Tick the ones to scan."
-          : "Nothing detected automatically — add your game folders below.";
-      }
+      hint.textContent = found.candidates && found.candidates.length
+        ? "Folders holding one subfolder per game. Tick the ones to scan, ✕ to remove."
+        : "Nothing detected automatically — add your game folders below.";
     }).catch(() => {
       holder.textContent = "";
       readRoots = folderList(holder, cfg.scan_roots || [], []);
-    });
+      hint.textContent = "Could not detect folders — add your game folders below.";
+    }).then(() => { $("modal-save").disabled = false; });
   }, async () => {
     const payload = {
       scan_roots: readRoots(),
@@ -748,6 +980,7 @@ function syncViewToggle() {
   }
 }
 
+$("add-btn").addEventListener("click", () => appDialog(null));
 $("settings-btn").addEventListener("click", settingsDialog);
 $("firstrun-btn").addEventListener("click", settingsDialog);
 

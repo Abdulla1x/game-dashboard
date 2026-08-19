@@ -240,6 +240,11 @@ def apply_overrides(games, overrides):
                       f"{rule['steam_appid']!r} is not a number — ignoring")
         if rule.get("art"):
             game["art_override"] = rule["art"]
+        if rule.get("companions"):
+            # Ids of other library entries to start alongside this one. One level only --
+            # a companion's own companions are never followed, which is also what makes a
+            # cycle impossible to build.
+            game["companions"] = [c for c in rule["companions"] if isinstance(c, str)]
         if rule.get("exe"):
             exe = rule["exe"]
             if not winpath.drive_of(exe) and game.get("install_dir"):
@@ -271,19 +276,38 @@ def _blank_owned_record(owned):
 
 
 def _blank_record(extra):
+    """A game the scanners cannot see, listed by hand or added from the UI.
+
+    `exe` may carry `args`; `url` covers launcher protocols and web apps. A url entry has
+    no executable, so it gets neither icon-derived cover art nor playtime tracking.
+    """
     exe = extra.get("exe")
+    args = [str(a) for a in (extra.get("args") or [])]
+    if exe:
+        launch = ({"kind": "exe_args", "value": exe, "args": args} if args
+                  else {"kind": "exe", "value": exe})
+    elif extra.get("url"):
+        launch = {"kind": "url", "value": extra["url"]}
+    else:
+        launch = {"kind": "none", "value": None}
     return {
         "id": extra["id"],
         "name": extra.get("name") or extra["id"],
         "source": extra.get("source", "manual"),
         "installed": True,
         "install_dir": extra.get("install_dir") or (winpath.dirname(exe) if exe else None),
-        "launch": {"kind": "exe", "value": exe} if exe else {"kind": "none", "value": None},
+        "launch": launch,
         "exe_name": winpath.basename(exe) if exe else None,
         "exe_path": exe,
+        # A loose .ico or a different binary to take the cover art from. Launcher-hosted
+        # apps need it: their exe is the launcher, whose icon is the launcher's.
+        "icon_path": extra.get("icon") or None,
         "size_bytes": 0,
         "last_played": None,
         "steam_appid": extra.get("steam_appid"),
+        # What the UI keys "Edit"/"Remove" off. Not `source == "manual"`: that is only a
+        # default here, and a hand-written entry may legitimately set its own.
+        "user_added": True,
     }
 
 

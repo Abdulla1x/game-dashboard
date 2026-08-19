@@ -141,6 +141,64 @@ that arrive over HTTP are validated at the boundary — not deeper in. A hand-ed
 distinction at the edge is what lets the documented hand-edit workflow stay permissive
 while the network surface stays narrow.
 
+### Manual entries move the trust boundary
+
+Before **+ Add**, no HTTP request could cause a binary the scanners had not already found
+to run. That is no longer true, and pretending otherwise would be worse than saying it.
+
+`_v_target` is defence in depth around a feature whose entire purpose is to run a program
+the dashboard has never seen; `_guard()` is what stops another origin reaching it at all.
+The target must already exist on disk, carry a `.exe`/`.lnk`/`.url` extension, and sit
+outside `%SystemRoot%` — one rule that rules out `cmd.exe`, `powershell.exe`, `mshta.exe`
+and every other System32 binary worth borrowing, with no list to keep up to date. A URL
+must match a scheme allowlist, which refuses `file:`, `javascript:`, `data:` and
+`ms-msdt:` by construction.
+
+Note the ordering inside the validator: a Windows drive letter is itself a syntactically
+valid URL scheme, so `C:\Games\X.exe` parses as the scheme `c:`. The path branch has to be
+tested first or every real path is classified as a rejected URL.
+
+`shell:AppsFolder\<AUMID>` is the hand-edit/HTTP split in one line: `_blank_record`
+supports the `shell` launch kind, and `_v_target` refuses the scheme. Launching any
+installed Store app is real surface for no motivating case.
+
+### `/api/apps` is a separate route on purpose
+
+`_override` refuses any id not already in the library, which is what keeps the reserved
+list keys `extra_games` and `owned_games` unreachable — a dict written to one of those
+breaks every later scan. `/api/apps` needs to write `extra_games`, so it cannot ride on
+that route. Its rule is the mirror image: an update may only touch an id that is *already*
+an entry in `extra_games`. That keeps `owned_games` and every scanner-found game out of
+reach, and it gives the product rule — you may only remove what you added. Everything else
+is Hide, because a rescan would bring it back anyway.
+
+### Companion apps
+
+One game, a list of other library ids, launched alongside it. Three things hold it up:
+
+- **The game goes first.** It was what got clicked; a broken helper must never cost you it.
+  A companion that fails is collected and reported, never raised.
+- **One level, always.** `launch_companions` calls the launcher directly and never
+  re-enters itself, so a cycle is impossible to build rather than merely unlikely. No
+  visited-set is needed, and none should be added.
+- **Companions are not tracked.** Playtime watches are keyed by executable name and later
+  calls overwrite earlier ones, so watching a helper would both invent sessions for it and
+  let it steal the key from a game sharing its binary name.
+
+A companion id that no longer resolves is reported, not pruned: folder ids are
+path-derived, so an offline drive makes a game disappear, and silently deleting the user's
+configuration for that is worse than a skipped launch. `_v_companions` keeps an id that is
+already stored for the same reason.
+
+### `apply_overrides` only ever sets
+
+It is written for freshly built records, so it sets derived fields — `hidden`,
+`art_override`, `companions` — and never clears them. That is fine during a scan and wrong
+on the in-place path `/api/override` uses to update the UI without rescanning: a cleared
+rule left the last value stuck on the live record until the next scan, which is why Unhide
+used to appear to do nothing. The route pops those keys before re-applying. Any new
+rule-derived field has to be popped there too.
+
 ## Where the fiddly bits are
 
 - `scanners/shortcuts.py` runs last, fills gaps, and is deliberately conservative — the

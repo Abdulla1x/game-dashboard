@@ -715,7 +715,9 @@ def resolve(game, cfg):
                 return card, "card"
 
     # 6. Build a cover from artwork the game already ships.
-    exe = game.get("exe_path")
+    # icon_path wins when set: a launcher-hosted app's exe is the launcher, so its icon
+    # is the launcher's logo. The shortcut points at the app's own .ico instead.
+    exe = game.get("icon_path") or game.get("exe_path")
     if exe and winpath.exists(exe) and _extract_icon(exe, png):
         try:
             with open(png, "rb") as fh:

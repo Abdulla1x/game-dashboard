@@ -134,6 +134,34 @@ def _resolve_lnk_targets(paths):
     return out
 
 
+def resolve_link(win_path):
+    """Target, arguments and icon of one .lnk, or {} when it cannot be read.
+
+    `_resolve_lnk_targets` answers the scanner's question -- where does this point --
+    for many links in one batched call. This answers the fuller one the manual-add route
+    needs. A launcher-hosted app puts the *app's* identity in the arguments and ships its
+    artwork as a loose .ico: Overwolf's Valorant Tracker shortcut targets
+    OverwolfLauncher.exe with `-launchapp <id>`, so a bare TargetPath gives you Overwolf
+    and nothing else.
+    """
+    quoted = "'" + winpath.windows(win_path).replace("'", "''") + "'"
+    script = (
+        "$s = New-Object -ComObject WScript.Shell; "
+        f"$t = $s.CreateShortcut({quoted}); "
+        "[PSCustomObject]@{ Target = $t.TargetPath; Arguments = $t.Arguments; "
+        "Icon = $t.IconLocation }"
+    )
+    for row in winshell.run_json(script, timeout=60):
+        if isinstance(row, dict) and row.get("Target"):
+            # IconLocation is returned raw ("path,index"); the caller decides what a
+            # usable icon is, because splitting it needs care -- a folder may have a
+            # comma in its name.
+            return {"target": row["Target"],
+                    "args": row.get("Arguments") or "",
+                    "icon": row.get("Icon") or ""}
+    return {}
+
+
 def _to_game(rec, claimed, claimed_appids):
     target = rec.get("target") or ""
     if not target:
