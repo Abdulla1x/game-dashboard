@@ -171,3 +171,43 @@ class ContainmentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeepAliveTest(unittest.TestCase):
+    """A rejected POST must not poison the connection.
+
+    _guard answers before reading the body, so those bytes are still in the socket. On a
+    keep-alive connection the next request then starts parsing mid-body and comes back as
+    a nonsense 501. The guard closes the connection instead of draining a body from a
+    caller it has already refused.
+    """
+
+    def test_refusal_closes_the_connection(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        port = httpd.server_address[1]
+        server.STATE["port"] = port
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.shutdown)
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        self.addCleanup(conn.close)
+
+        # Refused: wrong content type, and the body is never read.
+        conn.request("POST", "/api/rescan", body=b'{"padding":"xxxxxxxxxxxxxxxx"}',
+                     headers={"Content-Type": "text/plain"})
+        first = conn.getresponse()
+        first.read()
+        self.assertEqual(first.status, 415)
+        self.assertEqual(first.getheader("Connection"), "close")
+
+        # A fresh connection must behave normally rather than inheriting the leftovers.
+        conn2 = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        self.addCleanup(conn2.close)
+        conn2.request("GET", "/api/games")
+        second = conn2.getresponse()
+        second.read()
+        self.assertEqual(second.status, 200)

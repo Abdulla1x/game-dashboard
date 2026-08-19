@@ -449,6 +449,19 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
         return self._send(200, body, ctype, headers)
 
+    def _refuse(self, status, message):
+        """Reject a request without having read its body.
+
+        The body bytes are still sitting in the socket, and this connection is keep-alive
+        (HTTP/1.1, which the grid depends on). Leaving them there desynchronises the
+        parser, so the *next* request on the connection starts mid-body and comes back
+        as a nonsense 501. Closing is simpler and cheaper than draining an arbitrary
+        body from a caller we have already decided not to trust.
+        """
+        self.close_connection = True
+        self._send(status, {"error": message}, extra={"Connection": "close"})
+        return False
+
     def _guard(self):
         """Refuse anything a page on another origin could have aimed at us.
 
@@ -465,26 +478,22 @@ class Handler(BaseHTTPRequestHandler):
 
         # No Host match -> a DNS-rebinding name is pointing at us.
         if (self.headers.get("Host") or "").strip() not in hosts:
-            self._send(403, {"error": "bad host"})
-            return False
+            return self._refuse(403, "bad host")
 
         origin = (self.headers.get("Origin") or "").strip()
         if origin and origin not in {f"http://{h}" for h in hosts}:
-            self._send(403, {"error": "cross-origin request refused"})
-            return False
+            return self._refuse(403, "cross-origin request refused")
 
         # Modern browsers state the relationship themselves. Absent on curl and other
         # non-browser clients, so this only ever tightens the browser case.
         site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
         if site and site not in ("same-origin", "none"):
-            self._send(403, {"error": "cross-site request refused"})
-            return False
+            return self._refuse(403, "cross-site request refused")
 
         if self.command == "POST":
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
             if ctype.lower() != "application/json":
-                self._send(415, {"error": "expected Content-Type: application/json"})
-                return False
+                return self._refuse(415, "expected Content-Type: application/json")
         return True
 
     _MAX_BODY = 1 << 20
