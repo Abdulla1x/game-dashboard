@@ -162,6 +162,24 @@ tested first or every real path is classified as a rejected URL.
 supports the `shell` launch kind, and `_v_target` refuses the scheme. Launching any
 installed Store app is real surface for no motivating case.
 
+### A shortcut is three things, not one
+
+`.lnk` targets are resolved when the entry is added rather than launched later: `Popen`
+cannot run a `.lnk`, and storing the real binary is what gives the entry icon art and
+playtime tracking. But `TargetPath` alone is not the app.
+
+A launcher-hosted app — Overwolf, and every store client built the same way — puts the
+app's identity in the **arguments** and its artwork in a **separate `.ico`**. Valorant
+Tracker's shortcut is `OverwolfLauncher.exe -launchapp <app-id> -from-startmenu` with
+`AppShortcutIcons\<app-id>.ico`. Read only the target and every Overwolf app collapses
+into one entry called Overwolf, wearing the Overwolf logo. So `resolve_link()` returns
+all three, arguments the user typed are appended to the shortcut's own, and `icon` lands
+on the record as `icon_path`, which `art.resolve` prefers over `exe_path`.
+
+`peicon` reads a standalone `.ico` for that reason. It is nearly free: the on-disk ICONDIR
+is the same structure the PE resource directory keeps split apart, and the per-image blobs
+are byte-identical, so only the container parsing differs.
+
 ### `/api/apps` is a separate route on purpose
 
 `_override` refuses any id not already in the library, which is what keeps the reserved

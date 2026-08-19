@@ -72,8 +72,12 @@ That covers the things no scanner will ever reach: a launcher living in `%LOCALA
 one game inside a bundle folder where only the other was detected, or a tracker the Start
 Menu scanner deliberately filters out.
 
-A `.lnk` is resolved to its real target as you add it, so the entry gets a cover built
-from the executable's own icon and its playtime is tracked like anything else.
+A `.lnk` is resolved as you add it — **target, arguments and icon**. That matters more
+than it sounds: a launcher-hosted app puts its identity in the arguments and ships its
+artwork as a loose `.ico`, so Overwolf's Valorant Tracker shortcut is
+`OverwolfLauncher.exe -launchapp <id>` with its own icon file. Read only the target and
+you get plain Overwolf, wearing the Overwolf logo. Anything you type in **Arguments** is
+appended to whatever the shortcut already carried.
 
 ### Launching more than one thing
 
@@ -121,11 +125,15 @@ that bury the binary at `…\Gameface\Binaries\Win64\`.
 4. SteamGridDB, if a key is set — this is what covers Epic and Riot titles, launchers and
    mod clients, which have no Steam app ID at all
 5. A cover generated from the game's own artwork — the 256px icon inside the executable,
-   or the tile art a Store package ships — centred on a gradient sampled from that icon
+   the `.ico` a shortcut pointed at, or the tile art a Store package ships — centred on a
+   gradient sampled from that icon
 6. A generated lettered placeholder
 
 Icons come out of the executable's PE resource directory rather than via PowerShell's
 `ExtractAssociatedIcon`, which is capped at 32×32 and far too small to build a cover from.
+Standalone `.ico` files are read the same way: the on-disk format is the same directory
+the PE resource section keeps split apart, so a launcher-hosted app gets its *own*
+artwork rather than its launcher's.
 
 A bad name match is fixable: right-click → **Fix cover art** → set the Steam app ID.
 
@@ -185,6 +193,9 @@ rescans. You can also edit it directly:
   ]
 }
 ```
+
+An entry may also carry `icon`, a path to a `.ico` or a binary to take the cover from
+when the launch target's own icon is the wrong one. **+ Add** fills it in from a shortcut.
 
 `extra_games` is what **+ Add** writes, and it is still the place to add a title by hand —
 useful for bundles where several games share one folder, so only one is detected
