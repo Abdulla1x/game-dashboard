@@ -6,7 +6,7 @@ loose folders that belong to no launcher at all — with real cover art for all 
 **Pure Python 3 standard library.** No pip install, no npm, no build step, no service in
 the cloud. It runs a small HTTP server on `127.0.0.1` and opens a browser window at it.
 
-<img src="docs/screenshot-grid.png" width="800" alt="The game grid">
+<img src="docs/screenshot-grid.jpg" width="900" alt="The game grid, showing 64 installed games with cover art">
 
 ## Quick start
 
@@ -52,6 +52,11 @@ shortcut targets, Xbox app IDs, and icon rendering). That is all.
 - **Right-click a cover** for: Open folder, Rename, Pick executable, Fix cover art, Hide.
 - **Rescan** picks up newly installed games. **Measure sizes** walks folder games to fill
   in size on disk — slow, so it runs in the background and is never automatic.
+
+Switching to **All** brings in everything you own but have not installed, dimmed beside
+what is on disk. Clicking one hands the download to its launcher.
+
+<img src="docs/screenshot-all.jpg" width="900" alt="The All view, with owned-but-not-installed games dimmed">
 
 ## How it finds things
 
@@ -101,6 +106,11 @@ A bad name match is fixable: right-click → **Fix cover art** → set the Steam
 
 Settings are written by the **⚙ Settings** panel; `config.json` is just where they land.
 Copy `config.example.json` if you would rather write it by hand. It is gitignored.
+
+Folders are detected rather than typed: it enumerates your drives, reads Steam's install
+root from the registry, and counts how many subfolders of each candidate look like games.
+
+<img src="docs/screenshot-settings.jpg" width="900" alt="The settings panel listing detected game folders with game counts">
 
 ### Games you do not own on Steam alone
 
