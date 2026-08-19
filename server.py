@@ -2,6 +2,13 @@
 
 Binds 127.0.0.1 only and has no authentication — it can start arbitrary executables,
 so it must never be reachable from the network.
+
+Copyright (C) 2026 Mohammad Abdullah
+
+This program is free software: you can redistribute it and/or modify it under the terms
+of the GNU General Public License as published by the Free Software Foundation, either
+version 3 of the License, or (at your option) any later version. It is distributed
+WITHOUT ANY WARRANTY; see the GNU General Public License for more details.
 """
 
 import json

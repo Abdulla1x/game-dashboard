@@ -1,55 +1,57 @@
 # Game Dashboard
 
-One place to see and launch every game on this PC, across Steam, Epic, Xbox, Riot,
-and the ~40 standalone folders scattered over four drives.
+One place to see and launch every game on a Windows PC — Steam, Epic, Xbox, Riot, and the
+loose folders that belong to no launcher at all — with real cover art for all of them.
 
-Pure Python 3 standard library — no pip installs, no build step.
+**Pure Python 3 standard library.** No pip install, no npm, no build step, no service in
+the cloud. It runs a small HTTP server on `127.0.0.1` and opens a browser window at it.
 
-## Install
+<img src="docs/screenshot-grid.png" width="800" alt="The game grid">
+
+## Quick start
 
 ```bat
+git clone https://github.com/Abdulla1x/game-dashboard.git
+cd game-dashboard
 py install.py
 ```
 
-That renders `icon.ico` and creates two shortcuts:
+`install.py` renders the icon and creates two Start Menu shortcuts:
 
 | Shortcut | Where | What it does |
 | --- | --- | --- |
 | **Game Dashboard** | Start Menu | Opens the window. **Pin this one to the taskbar.** |
 | Game Dashboard Server | Start Menu ▸ Startup | Runs the server headless at login |
 
-Then: Start Menu → right-click **Game Dashboard** → *Pin to taskbar*.
-
-Start the server now without rebooting:
+Start it without rebooting:
 
 ```bat
 start "" pythonw dashboard.pyw
 ```
 
-### Why it opens in Chrome
+Steam, Epic, Xbox and Riot are found automatically. Loose game folders need pointing at
+once — open **⚙ Settings**, tick the folders it detected, and save. To see what it would
+find before installing anything:
 
-The shortcut targets `chrome.exe --app=http://127.0.0.1:8777`. App mode gives the window
-its own AppUserModelID, so Windows treats the dashboard as a separate app with its own
-taskbar button and icon instead of grouping it under your browser. Firefox — the default
-browser here — removed app-window mode, which is why it is not used even though it is the
-system default.
+```bat
+py detect.py
+```
 
-Set `"browser": "edge"` in `config.json` to use Edge instead, or `"default"` to open a
-plain tab in Firefox (simpler, but you lose the dedicated taskbar button).
+**Requirements:** Windows 10 or 11, Python 3.8+, and PowerShell (used for Start Menu
+shortcut targets, Xbox app IDs, and icon rendering). That is all.
 
-## Use
+## Using it
 
 - **Click a cover** to launch.
-- **Installed / All** switches between what is on this PC and your whole library.
-  Games you own but have not installed appear dimmed under **All**; clicking one asks
-  first, then hands the download to its launcher.
+- **Installed / All** switches between what is on this PC and your whole library. Games
+  you own but have not installed appear dimmed under **All**; clicking one hands the
+  download to its launcher.
 - **`/`** focuses search. Type to filter instantly.
-- **Source chips** filter by Steam / Epic / folder / etc.
-- **Sort** by name, last played, playtime, or size on disk.
-- **Right-click a cover** (or the `⋯` button) for: Open folder, Rename, Pick executable,
-  Fix cover art, Hide.
-- **Rescan** picks up newly installed games. **Measure sizes** walks the folder games to
-  fill in size on disk — slow, so it runs in the background and is not automatic.
+- **Source chips** filter by Steam / Epic / folder / etc. **Sort** by name, last played,
+  playtime, or size on disk.
+- **Right-click a cover** for: Open folder, Rename, Pick executable, Fix cover art, Hide.
+- **Rescan** picks up newly installed games. **Measure sizes** walks folder games to fill
+  in size on disk — slow, so it runs in the background and is never automatic.
 
 ## How it finds things
 
@@ -57,30 +59,56 @@ plain tab in Firefox (simpler, but you lose the dedicated taskbar button).
 | --- | --- |
 | Steam | `libraryfolders.vdf` → each library's `appmanifest_*.acf` |
 | Epic | `%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests\*.item` |
-| Xbox | `C:\XboxGames` matched to AUMIDs from `Get-StartApps` |
+| Xbox | `XboxGames` matched to app IDs from `Get-StartApps` |
 | Riot | `RiotClientServices.exe --launch-product=…` |
-| Folders | `config.json` → `scan_roots`, using the executable heuristic below |
+| Folders | your `scan_roots`, gated by the executable heuristic below |
 | Shortcuts | Start Menu `.lnk`/`.url`, conservatively filtered, runs last |
-| Steam (owned) | `GetOwnedGames` with an API key, else the appids Steam has cached art for |
-| Epic (owned) | The account's library service, after `py epicauth.py` |
+| Steam (owned) | `GetOwnedGames` with an API key, else the appids Steam cached art for |
+| Epic (owned) | the account's library service, after `py epicauth.py` |
 
-### Games you do not have installed
+### The executable heuristic
 
-Off by default only in the sense that they are hidden until you switch to **All**. Set
-`"include_owned": false` in `config.json` to stop collecting them altogether.
+A folder counts as a game **only if a plausible executable is found in it**.
+Redistributables, uninstallers, crash handlers and console tools are rejected by name and
+by parent directory; survivors are scored on name similarity to the folder, then depth,
+then size.
 
-**Steam.** Put a free key from [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey)
-and your 64-bit SteamID in `config.json`:
+That gate is load-bearing rather than a nicety. Clip recorders like Medal and ReLive
+create a folder named after every game you play, sitting right beside real installs and
+containing nothing but video. Without the gate each one becomes a phantom game that
+cannot be launched.
 
-```json
-{ "steam_api_key": "…", "steam_id": "76561198…" }
-```
+If nothing is found at depth 4, one deeper pass at depth 6 catches Unreal-style repacks
+that bury the binary at `…\Gameface\Binaries\Win64\`.
 
-That is the only source that truly knows what the account owns. It also needs Steam
-privacy set to **Game details: Public**. Without a key the library is inferred from the
-appids Steam has cached artwork for, which works but drags in DLC and delisted apps —
-each candidate is checked against the store and only real games are kept, so the first
-scan after enabling it is slow and the verdicts are cached in `data/steam_apptypes.json`.
+### Cover art
+
+1. Steam's own cache — including the newer hash-subdirectory layout
+2. Steam's CDN by app ID
+3. For non-Steam games: name → app ID via Steam's community search, then the CDN
+4. SteamGridDB, if a key is set — this is what covers Epic and Riot titles, launchers and
+   mod clients, which have no Steam app ID at all
+5. A cover generated from the game's own artwork — the 256px icon inside the executable,
+   or the tile art a Store package ships — centred on a gradient sampled from that icon
+6. A generated lettered placeholder
+
+Icons come out of the executable's PE resource directory rather than via PowerShell's
+`ExtractAssociatedIcon`, which is capped at 32×32 and far too small to build a cover from.
+
+A bad name match is fixable: right-click → **Fix cover art** → set the Steam app ID.
+
+## Configuration
+
+Settings are written by the **⚙ Settings** panel; `config.json` is just where they land.
+Copy `config.example.json` if you would rather write it by hand. It is gitignored.
+
+### Games you do not own on Steam alone
+
+**Steam.** A free key from [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey)
+plus your 64-bit SteamID gives the real owned library, and needs Steam privacy set to
+**Game details: Public**. Without a key the library is inferred from the appids Steam has
+cached artwork for, which works but drags in DLC and delisted apps — so every candidate is
+checked against the store and the verdicts are cached.
 
 **Epic.** Epic keeps no offline record of what you own, so it needs a one-time sign-in:
 
@@ -88,57 +116,14 @@ scan after enabling it is slow and the verdicts are cached in `data/steam_apptyp
 py epicauth.py
 ```
 
-It prints a login URL and asks for the `authorizationCode` shown afterwards. Tokens live
-in `data/epic_auth.json` and refresh themselves; when the refresh token finally lapses,
-run it again.
+This uses Epic's launcher OAuth flow, which is unofficial and unsupported — it is the same
+approach [legendary](https://github.com/derrod/legendary) and Heroic use. It is entirely
+optional; skip it and the Epic side stays install-only. Tokens live in `data/epic_auth.json`
+and refresh themselves.
 
-**Everything else.** Xbox/Game Pass, Battle.net, Riot, Rockstar and EA expose no
-ownership API that can be read without per-launcher OAuth, so they are listed by hand in
-`data/overrides.json`:
-
-```json
-{
-  "owned_games": [
-    { "id": "xbox:forza-horizon-5",
-      "name": "Forza Horizon 5",
-      "source": "xbox",
-      "install_url": "ms-windows-store://pdp/?productid=9NKX70BBCDRN" }
-  ]
-}
-```
-
-`install_url` is whatever protocol link the launcher uses — `steam://install/<appid>`,
-`com.epicgames.launcher://apps/<id>?action=install`, `battlenet://<code>`,
-`ms-windows-store://pdp/?productid=<id>`.
-### The executable heuristic
-
-A folder counts as a game **only if a plausible executable is found in it**. Redistributables,
-uninstallers, crash handlers and console tools are rejected by name and by parent directory;
-survivors are scored on name similarity to the folder, then depth, then size. Folders with no
-surviving executable are skipped — which is what keeps `G:\VALORANT`, `G:\Counter-Strike 2`,
-`G:\KovaaK's` and `G:\rocketleague` (Medal clip folders, no game) out of the library.
-
-If nothing is found at depth 4, one deeper pass at depth 6 catches Unreal-style repacks that
-bury the binary at `…\Gameface\Binaries\Win64\`.
-
-### Cover art
-
-1. Steam's own cache — `appcache\librarycache\<appid>\`, including the newer
-   hash-subdirectory layout
-2. Steam CDN by appid
-3. For non-Steam games: name → appid via Steam's community search, then the CDN
-4. SteamGridDB, if `steamgriddb_key` is set — this is what finds covers for the things
-   Steam has no app ID for at all: Epic and Riot titles, launchers, mod clients
-5. A cover generated here from the game's own artwork — the 256px icon in the
-   executable, or the tile art an Xbox/Store package ships — centred on a gradient
-   sampled from that icon, so it fills the tile like a real cover
-6. A generated lettered placeholder
-
-A bad name match is fixable: right-click → **Fix cover art** → set the Steam app ID.
-
-Icons come out of the executable's PE resource directory (`peicon.py`). PowerShell's
-`ExtractAssociatedIcon` is capped at 32×32, which is far too small to build a cover
-from; it is only the fallback for binaries carrying no icon resource.
+**Everything else.** Xbox/Game Pass, Battle.net, Riot, Rockstar and EA expose no ownership
+API that can be read without per-launcher OAuth, so they are listed by hand in
+`data/overrides.json` under `owned_games`.
 
 ## Fixing what it gets wrong
 
@@ -147,63 +132,90 @@ rescans. You can also edit it directly:
 
 ```json
 {
-  "folder:EGames--Red Dead Redemption 2": { "exe": "Red Dead Redemption 2\\RDR2.exe" },
-  "folder:EGames--UE_4.26": { "hidden": true },
-  "folder:EGames--Stray": { "steam_appid": 1332010 },
+  "folder:D--Games--Some Game": { "exe": "Bin\\SomeGame.exe" },
+  "folder:D--Games--UE_4.26":   { "hidden": true },
+  "folder:D--Games--Stray":     { "steam_appid": 1332010 },
 
   "extra_games": [
-    { "id": "manual:gta3",
-      "name": "GTA III Definitive Edition",
-      "exe": "E:\\Games\\GTA The Trilogy Definitive Edition\\GTA.The.Trilogy.Definitive.Edition.v1.0.0.14377\\GTA III - Definitive Edition\\Gameface\\Binaries\\Win64\\LibertyCity.exe" }
+    { "id": "manual:example",
+      "name": "A Game The Scanners Cannot See",
+      "exe": "D:\\Games\\Bundle\\Sub Game\\Game.exe" }
   ]
 }
 ```
 
-`extra_games` is how you add a title the scanners cannot see — useful for the GTA Trilogy,
-which is three games sharing one folder, so only one of them is detected automatically.
-
-`exe` may be relative to the game's install folder or an absolute path.
+`extra_games` is how you add a title the scanners cannot see — useful for bundles where
+several games share one folder, so only one is detected automatically. `exe` may be
+relative to the game's install folder or an absolute path.
 
 ## Playtime
 
 Steam reports its own last-played time. For everything else the dashboard tracks its own:
-after you launch a game it polls `tasklist` for the executable, opens a session on first
-sighting and closes it when the process disappears. Sessions shorter than 30 seconds are
-discarded. Data lives in `data/playtime.json`.
+after a launch it polls `tasklist` for the executable, opens a session on first sighting
+and closes it when the process disappears. Sessions under 30 seconds are discarded.
 
-Because tracking is keyed on the executable name, a game whose real binary differs from the
-detected one will not be tracked — fix it with **Pick executable**.
+Because tracking is keyed on the executable name, a game whose real binary differs from
+the detected one will not be tracked — fix it with **Pick executable**.
 
-## Checking it still works
+## Security
+
+The server binds `127.0.0.1` only and has no authentication, because it can start
+arbitrary executables. **Do not change the bind address and do not put it behind a tunnel.**
+
+Loopback is not a boundary against your own browser, though: any page you have open can
+send requests to `127.0.0.1`. So every request is checked for a matching `Host` header
+(which blocks DNS rebinding), a same-origin `Origin` when one is present, and
+`Content-Type: application/json` on POST — the last is what forces a CORS preflight that a
+cross-origin page cannot pass. An executable supplied over HTTP must resolve inside that
+game's own install folder, and cover art is verified by magic bytes rather than file
+extension, so the art endpoint cannot be turned into a file reader.
+
+A hand-edited `data/overrides.json` is deliberately *not* subject to those limits: that
+file is already trusted, and the constraint belongs at the HTTP boundary.
+
+If you find something, please open an issue.
+
+## Development
 
 ```bat
-py scan.py --selftest     # asserts the decoy folders stay out, no duplicates, etc.
-py scan.py --dry-run -v   # full table plus dedupe decisions, writes nothing
+py -m unittest discover tests    :: portable; runs anywhere
+py scan.py --selftest            :: structural invariants over your real library
+py scan.py --dry-run -v          :: full table plus dedupe decisions, writes nothing
+py detect.py                     :: what setup detection sees on this machine
 ```
+
+Python changes need a server restart; `web/` is served from disk and only needs a reload.
+
+```bat
+taskkill /F /IM pythonw.exe
+start "" pythonw dashboard.pyw
+```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit and which invariants matter,
+and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
 
 ## Layout
 
 ```
 dashboard.pyw   entry point (pythonw: no console window)
-install.py      icon + shortcuts
+install.py      icon + Start Menu shortcuts
+detect.py       works out where this machine keeps its games
 server.py       HTTP server, 127.0.0.1 only
 scan.py         runs scanners, merges, dedupes, applies overrides
-scanners/       steam, epic, xbox, riot, folders, shortcuts,
-                owned_steam, owned_epic
+scanners/       steam, epic, xbox, riot, folders, shortcuts, owned_steam, owned_epic
 exefind.py      the executable heuristic
 art.py          cover art resolution
 peicon.py       largest icon out of a PE binary, and PNG encode/decode
-epicauth.py     one-time Epic sign-in (py epicauth.py)
+epicauth.py     one-time Epic sign-in
 playtime.py     session tracking
 vdf.py          Valve KeyValues parser
-winpath.py      Windows/WSL path translation (lets the scanners be tested from WSL)
-winshell.py     PowerShell bridge (.lnk targets, AUMIDs, icon rendering)
-web/            index.html, app.js, style.css, favicon.ico
-data/           library.json, overrides.json, playtime.json, art/,
-                epic_auth.json, steam_apptypes.json  (generated)
+winpath.py      Windows/WSL path translation
+winshell.py     PowerShell bridge
+web/            index.html, app.js, style.css
+tests/          unittest suite, no external dependencies
+data/           generated: library.json, overrides.json, art/, tokens (gitignored)
 ```
 
-## Security
+## License
 
-The server binds `127.0.0.1` only and has no authentication, because it can start arbitrary
-executables. Do not change the bind address or put it behind a tunnel.
+GPL-3.0. See [LICENSE](LICENSE).

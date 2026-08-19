@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # The project targets Windows, but the test suite is deliberately portable: it builds
+    # its own fixtures rather than asserting against an installed library. Running Linux
+    # too is what keeps that honest.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.8", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Check every module imports and compiles
+        run: python -m compileall -q . -x '__pycache__|data'
+
+      - name: Run tests
+        run: python -m unittest discover tests -v
