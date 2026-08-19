@@ -26,6 +26,7 @@ py install.py
 Start it without rebooting:
 
 ```bat
+cd /d C:\path\to\game-dashboard
 start "" pythonw dashboard.pyw
 ```
 
@@ -49,7 +50,9 @@ shortcut targets, Xbox app IDs, and icon rendering). That is all.
 - **`/`** focuses search. Type to filter instantly.
 - **Source chips** filter by Steam / Epic / folder / etc. **Sort** by name, last played,
   playtime, or size on disk.
-- **Right-click a cover** for: Open folder, Rename, Pick executable, Fix cover art, Hide.
+- **Right-click a cover** for: Open folder, Launch with…, Rename, Pick executable,
+  Fix cover art, Hide. Apps you added yourself get Edit and Remove too.
+- **+ Add** puts anything else in the library — see below.
 - **Rescan** picks up newly installed games. **Measure sizes** walks folder games to fill
   in size on disk — slow, so it runs in the background and is never automatic.
 
@@ -57,6 +60,30 @@ Switching to **All** brings in everything you own but have not installed, dimmed
 what is on disk. Clicking one hands the download to its launcher.
 
 <img src="docs/screenshot-all.jpg" width="900" alt="The All view, with owned-but-not-installed games dimmed">
+
+### Adding something the scanners cannot see
+
+**+ Add** takes a name and a target: a path to a `.exe`, a `.lnk` or `.url` shortcut, or a
+link like `steam://rungameid/570` or `https://tracker.gg/…`. Arguments are optional, and
+unticking **Show in library** keeps it out of the grid — which is what you want for a
+helper you only ever launch alongside something else.
+
+That covers the things no scanner will ever reach: a launcher living in `%LOCALAPPDATA%`,
+one game inside a bundle folder where only the other was detected, or a tracker the Start
+Menu scanner deliberately filters out.
+
+A `.lnk` is resolved to its real target as you add it, so the entry gets a cover built
+from the executable's own icon and its playtime is tracked like anything else.
+
+### Launching more than one thing
+
+**Right-click ▸ Launch with…** picks other entries to start alongside a game — a tracker
+with Valorant, a mod launcher with Minecraft. The tile then reads `+1 app`, and one click
+starts the lot.
+
+The game starts first, and a companion that fails is reported rather than allowed to stop
+it. Companions are one level deep: a companion's own companions are not launched, which is
+what makes a loop impossible to build rather than merely unlikely.
 
 ## How it finds things
 
@@ -145,18 +172,30 @@ rescans. You can also edit it directly:
   "folder:D--Games--Some Game": { "exe": "Bin\\SomeGame.exe" },
   "folder:D--Games--UE_4.26":   { "hidden": true },
   "folder:D--Games--Stray":     { "steam_appid": 1332010 },
+  "riot:valorant":              { "companions": ["manual:valorant-tracker"] },
 
   "extra_games": [
     { "id": "manual:example",
       "name": "A Game The Scanners Cannot See",
-      "exe": "D:\\Games\\Bundle\\Sub Game\\Game.exe" }
+      "exe": "D:\\Games\\Bundle\\Sub Game\\Game.exe",
+      "args": ["-windowed"] },
+    { "id": "manual:valorant-tracker",
+      "name": "Valorant Tracker",
+      "url": "https://tracker.gg/valorant" }
   ]
 }
 ```
 
-`extra_games` is how you add a title the scanners cannot see — useful for bundles where
-several games share one folder, so only one is detected automatically. `exe` may be
-relative to the game's install folder or an absolute path.
+`extra_games` is what **+ Add** writes, and it is still the place to add a title by hand —
+useful for bundles where several games share one folder, so only one is detected
+automatically. `exe` may be relative to the game's install folder or absolute, `args` is
+optional, and `url` replaces `exe` for a protocol or web link. The id is generated from
+the name when the entry is created and then frozen: renaming does not move it, so playtime
+and cover art survive. Removing an entry and adding it again under the same name gets its
+playtime back.
+
+`companions` lists the ids of entries to launch alongside a game. A hand-written one may
+name anything; the picker in the UI only offers what is installed.
 
 ## Playtime
 
@@ -165,7 +204,9 @@ after a launch it polls `tasklist` for the executable, opens a session on first 
 and closes it when the process disappears. Sessions under 30 seconds are discarded.
 
 Because tracking is keyed on the executable name, a game whose real binary differs from
-the detected one will not be tracked — fix it with **Pick executable**.
+the detected one will not be tracked — fix it with **Pick executable**. Companion apps are
+deliberately not tracked: a helper left running all day would otherwise log a session
+against itself, and against the game whenever the two share an executable name.
 
 ## Security
 
@@ -176,9 +217,15 @@ Loopback is not a boundary against your own browser, though: any page you have o
 send requests to `127.0.0.1`. So every request is checked for a matching `Host` header
 (which blocks DNS rebinding), a same-origin `Origin` when one is present, and
 `Content-Type: application/json` on POST — the last is what forces a CORS preflight that a
-cross-origin page cannot pass. An executable supplied over HTTP must resolve inside that
-game's own install folder, and cover art is verified by magic bytes rather than file
+cross-origin page cannot pass. An executable *corrected* over HTTP must resolve inside
+that game's own install folder, and cover art is verified by magic bytes rather than file
 extension, so the art endpoint cannot be turned into a file reader.
+
+Adding a game by hand is the one route that names a program the dashboard has never seen,
+which is the entire point of the feature — so it is fenced rather than forbidden. The
+target must already exist on disk and be a `.exe`, `.lnk` or `.url` outside the Windows
+directory, or a link whose scheme is on a fixed list. That narrows what a bug in the
+request guard would be worth. It is not itself the boundary; the guard is.
 
 A hand-edited `data/overrides.json` is deliberately *not* subject to those limits: that
 file is already trusted, and the constraint belongs at the HTTP boundary.
@@ -197,8 +244,9 @@ py detect.py                     :: what setup detection sees on this machine
 Python changes need a server restart; `web/` is served from disk and only needs a reload.
 
 ```bat
-taskkill /F /IM pythonw.exe
-start "" pythonw dashboard.pyw
+cd /d C:\path\to\game-dashboard      :: pythonw has no console, so starting it from the
+taskkill /F /IM pythonw.exe          :: wrong directory fails silently and looks like a
+start "" pythonw dashboard.pyw       :: dead port
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit and which invariants matter,

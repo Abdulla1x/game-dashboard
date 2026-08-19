@@ -110,6 +110,37 @@ def _icon_blobs(path):
         return blobs
 
 
+def _ico_file_blobs(path):
+    """Every image in a standalone .ico file, as raw bytes.
+
+    A .ico is the same ICONDIR the PE resource directory keeps split apart, and the
+    per-image blobs are byte-identical -- PNG or bottom-up DIB -- so everything below
+    works on either source. Launcher-hosted apps (Overwolf, and the store clients that
+    work the same way) ship their real icon as a loose .ico beside the launcher binary,
+    which is the only place their artwork exists.
+    """
+    with open(path, "rb") as fh:
+        head = fh.read(6)
+        if len(head) < 6:
+            return []
+        reserved, kind, count = struct.unpack("<HHH", head)
+        if reserved or kind != 1 or not 0 < count <= 64:
+            return []
+        table = fh.read(16 * count)
+        if len(table) < 16 * count:
+            return []
+        blobs = []
+        for i in range(count):
+            size, offset = struct.unpack("<II", table[i * 16 + 8:i * 16 + 16])
+            if not 0 < size <= 8 << 20:
+                continue
+            fh.seek(offset)
+            blob = fh.read(size)
+            if len(blob) == size:
+                blobs.append(blob)
+        return blobs
+
+
 # -- DIB -> PNG ----------------------------------------------------------
 
 
@@ -295,12 +326,19 @@ def _dimensions(blob):
     return 0, 0
 
 
-def largest_icon_png(exe_native_path):
-    """Best (largest) icon in `exe_native_path` as PNG bytes, or None."""
-    if not exe_native_path or not os.path.isfile(exe_native_path):
+def largest_icon_png(native_path):
+    """Best (largest) icon in `native_path` as PNG bytes, or None.
+
+    Accepts a PE binary or a standalone .ico, told apart by magic rather than extension.
+    """
+    if not native_path or not os.path.isfile(native_path):
         return None
     try:
-        blobs = _icon_blobs(exe_native_path)
+        with open(native_path, "rb") as fh:
+            magic = fh.read(4)
+        # ICONDIR: reserved 0, type 1. A PE starts "MZ".
+        read = _ico_file_blobs if magic[:4] == b"\x00\x00\x01\x00" else _icon_blobs
+        blobs = read(native_path)
     except (ValueError, OSError, struct.error, IndexError):
         return None
 
@@ -324,11 +362,11 @@ def largest_icon_png(exe_native_path):
     return None
 
 
-def write_largest_icon(exe_win_path, dest_png):
+def write_largest_icon(win_path, dest_png):
     """Extract to `dest_png`. Returns True on success."""
     import winpath
 
-    png = largest_icon_png(winpath.native(exe_win_path))
+    png = largest_icon_png(winpath.native(win_path))
     if not png:
         return False
     with open(dest_png, "wb") as fh:

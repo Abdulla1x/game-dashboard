@@ -82,7 +82,12 @@ select, .ghost, .primary {
 select:hover, .ghost:hover { background: var(--surface-2); border-color: #333b4d; }
 .primary { background: var(--accent); border-color: var(--accent); color: #0b1220; font-weight: 600; }
 .primary:hover { filter: brightness(1.08); }
-.ghost[disabled] { opacity: .5; cursor: default; }
+.ghost[disabled], .primary[disabled] { opacity: .5; cursor: default; }
+
+/* Destructive confirm. The only other red in the file is the error toast, and reusing
+   its border colour keeps "something is wrong here" a single hue. */
+.danger { background: #7a3040; border-color: #7a3040; color: #fff; font-weight: 600; }
+.danger:hover { filter: brightness(1.12); }
 
 .seg {
   display: flex;
@@ -348,6 +353,20 @@ main { padding: 14px 22px 60px; }
 
 .folder-add { display: flex; gap: 8px; margin-top: 4px; }
 .folder-add input { flex: 1; min-width: 0; }
+
+/* .folder is a flex row that reserved no space on the right until the ✕ arrived. */
+.folder > div { flex: 1; min-width: 0; }
+.folder .x {
+  flex: none; align-self: center; margin-left: auto;
+  width: 24px; height: 24px; padding: 0; line-height: 22px;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  color: var(--muted); font-size: 12px; cursor: pointer;
+}
+.folder .x:hover { color: var(--text); border-color: #7a3040; background: #2a1620; }
+
+/* The companion picker can list the whole library, so it scrolls inside the modal
+   rather than pushing the Save button off the bottom. */
+.folders.scroll { max-height: 46vh; overflow-y: auto; }
 
 /* Chrome paints its own background on autofilled fields, which turns the API key
    inputs into white boxes in an otherwise dark dialog. */
