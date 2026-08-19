@@ -293,3 +293,56 @@ main { padding: 14px 22px 60px; }
   .controls { margin-left: 0; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 13px; }
 }
+
+/* ---------- first run ---------- */
+
+.firstrun {
+  max-width: 520px;
+  margin: 70px auto;
+  text-align: center;
+  color: var(--muted);
+}
+.firstrun h2 { color: var(--text); font-size: 20px; margin: 0 0 10px; }
+.firstrun p { font-size: 13.5px; line-height: 1.6; margin: 0 0 22px; }
+
+/* ---------- settings ---------- */
+
+.modal h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--muted);
+  margin: 22px 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.modal h3:first-child { margin-top: 0; }
+.modal .note { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5; }
+
+.field.check { display: flex; align-items: center; gap: 9px; cursor: pointer; }
+.field.check span { font-size: 13px; }
+
+.folders { display: flex; flex-direction: column; gap: 6px; }
+.folder {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.folder:hover { border-color: var(--accent); }
+.folder input { margin-top: 2px; }
+.folder b { font-weight: 600; font-size: 13px; word-break: break-all; }
+.folder em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  display: block;
+  margin-top: 2px;
+}
+
+.folder-add { display: flex; gap: 8px; margin-top: 4px; }
+.folder-add input { flex: 1; min-width: 0; }

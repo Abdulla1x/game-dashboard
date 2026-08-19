@@ -80,6 +80,7 @@ async function refresh() {
     const data = await api("/api/games");
     $("sizes-btn").disabled = data.sizing;
     $("rescan-btn").disabled = data.scanning;
+    state.scanning = data.scanning;
     if (data.scanning || data.sizing) setTimeout(refresh, 2500);
 
     const sig = signature(data.games);
@@ -176,7 +177,12 @@ function render() {
     }
   }
 
-  $("empty").hidden = list.length > 0;
+  // Two different empty states: a search that matched nothing, and a library with
+  // nothing in it yet. Showing "Nothing matches that search" to a new user describes a
+  // problem they do not have.
+  const bare = state.games.length === 0;
+  $("empty").hidden = list.length > 0 || bare;
+  $("firstrun").hidden = !(bare && !state.scanning);
   const pool = state.games.filter((g) => !g.hidden &&
     (state.view === "all" || isInstalled(g)));
   $("count").textContent = list.length === pool.length
@@ -422,7 +428,11 @@ function openModal(title, buildBody, save, saveLabel) {
   onSave = save;
   modal.hidden = false;
   const first = body.querySelector("input");
-  if (first) { first.focus(); first.select(); }
+  if (first) {
+    first.focus();
+    // select() is only meaningful on a text field, and throws on a checkbox.
+    if (first.type === "text" || first.type === "password") first.select();
+  }
 }
 
 function closeModal() { modal.hidden = true; onSave = null; }
@@ -513,6 +523,193 @@ async function exeDialog(game) {
   }, () => override(game.id, { exe: manual.value.trim() }));
 }
 
+/* ---------- settings ---------- */
+
+/* Rows of folder paths with a checkbox each: detected candidates come pre-ticked when
+   they are already configured, and anything already in the config that detection did
+   not propose is appended so saving never silently drops it. */
+function folderList(parent, configured, detected) {
+  const wrap = document.createElement("div");
+  wrap.className = "folders";
+  parent.appendChild(wrap);
+
+  const rows = [];
+  const add = (path, on, note) => {
+    if (rows.some((r) => r.path.toLowerCase() === path.toLowerCase())) return;
+    const row = document.createElement("label");
+    row.className = "folder";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = on;
+    const text = document.createElement("div");
+    text.innerHTML = "<b></b><em></em>";
+    text.querySelector("b").textContent = path;
+    text.querySelector("em").textContent = note;
+    row.append(box, text);
+    wrap.appendChild(row);
+    rows.push({ path, box });
+  };
+
+  for (const cand of detected) {
+    const games = `${cand.game_count}${cand.sampled ? "+" : ""} game${cand.game_count === 1 ? "" : "s"}`;
+    const where = cand.source === "steam" ? "Steam library — already covered by the Steam scanner"
+                : cand.source === "drive-root" ? "drive root"
+                : "found on disk";
+    add(cand.path, cand.already_configured, `${games} · ${where}`);
+  }
+  for (const path of configured) add(path, true, "in your config");
+
+  const adder = document.createElement("div");
+  adder.className = "folder-add";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "D:\\Games";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ghost";
+  btn.textContent = "Add";
+  const commit = () => {
+    const path = input.value.trim();
+    if (!path) return;
+    add(path, true, "added by you");
+    input.value = "";
+    wrap.appendChild(adder);
+  };
+  btn.addEventListener("click", commit);
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); commit(); }
+  });
+  adder.append(input, btn);
+  wrap.appendChild(adder);
+
+  return () => rows.filter((r) => r.box.checked).map((r) => r.path);
+}
+
+function secretField(parent, label, info) {
+  const input = field(parent, label, "",
+    info.set ? `saved${info.hint ? ` \u00b7 ends ${info.hint}` : ""} — leave blank to keep`
+             : "not set");
+  input.type = "password";
+  return input;
+}
+
+async function settingsDialog() {
+  let data;
+  try {
+    data = await api("/api/settings");
+  } catch (err) {
+    return toast(err.message, true);
+  }
+
+  const cfg = data.config;
+  let readRoots = () => cfg.scan_roots || [];
+  let readExtra = () => cfg.extra_game_dirs || [];
+  let apiKey, gridKey, steamId, owned, port, browser;
+
+  openModal("Settings", (body) => {
+    const section = (title, hint) => {
+      const h = document.createElement("h3");
+      h.textContent = title;
+      body.appendChild(h);
+      if (hint) {
+        const p = document.createElement("p");
+        p.className = "note";
+        p.textContent = hint;
+        body.appendChild(p);
+      }
+    };
+
+    section("Game folders", "Folders holding one subfolder per game. Detecting\u2026");
+    const holder = document.createElement("div");
+    body.appendChild(holder);
+
+    section("Accounts");
+    steamId = field(body, "Steam ID (64-bit)", cfg.steam_id || "", "76561198\u2026");
+    apiKey = secretField(body, "Steam API key", data.secrets.steam_api_key);
+    gridKey = secretField(body, "SteamGridDB key", data.secrets.steamgriddb_key);
+    owned = checkbox(body, "Include games I own but have not installed", cfg.include_owned);
+
+    section("App");
+    port = field(body, "Port", String(cfg.port ?? 8777));
+    browser = select(body, "Browser", ["chrome", "edge", "default"], cfg.browser || "chrome");
+
+    // Detection is a couple of seconds of disk work, so the modal opens first and the
+    // folder list fills in when it lands.
+    api("/api/detect").then((found) => {
+      holder.textContent = "";
+      readRoots = folderList(holder, cfg.scan_roots || [], found.candidates || []);
+      const note = body.querySelector(".note");
+      if (note) {
+        note.textContent = found.candidates && found.candidates.length
+          ? "Folders holding one subfolder per game. Tick the ones to scan."
+          : "Nothing detected automatically — add your game folders below.";
+      }
+    }).catch(() => {
+      holder.textContent = "";
+      readRoots = folderList(holder, cfg.scan_roots || [], []);
+    });
+  }, async () => {
+    const payload = {
+      scan_roots: readRoots(),
+      extra_game_dirs: readExtra(),
+      steam_id: steamId.value.trim(),
+      include_owned: owned.checked,
+      port: Number(port.value.trim()) || 8777,
+      browser: browser.value,
+    };
+    // Blank means "keep what is stored" — the server never sent the value to begin with.
+    if (apiKey.value.trim()) payload.steam_api_key = apiKey.value.trim();
+    if (gridKey.value.trim()) payload.steamgriddb_key = gridKey.value.trim();
+
+    const res = await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    for (const warn of res.warnings || []) toast(warn, true);
+    if ((res.restart_required || []).length) {
+      toast(`Restart the dashboard to apply: ${res.restart_required.join(", ")}`);
+    }
+    if ((res.reinstall_required || []).length) {
+      toast(`Re-run "py install.py" to update the shortcut`);
+    }
+    lastSignature = null;
+    refresh();
+  }, "Save and rescan");
+}
+
+function checkbox(parent, labelText, on) {
+  const wrap = document.createElement("label");
+  wrap.className = "field check";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = !!on;
+  const span = document.createElement("span");
+  span.textContent = labelText;
+  wrap.append(input, span);
+  parent.appendChild(wrap);
+  return input;
+}
+
+function select(parent, labelText, options, value) {
+  const wrap = document.createElement("div");
+  wrap.className = "field";
+  const label = document.createElement("label");
+  label.textContent = labelText;
+  const sel = document.createElement("select");
+  for (const opt of options) {
+    const o = document.createElement("option");
+    o.value = opt;
+    o.textContent = opt;
+    sel.appendChild(o);
+  }
+  sel.value = value;
+  wrap.append(label, sel);
+  parent.appendChild(wrap);
+  return sel;
+}
+
 /* ---------- toast ---------- */
 
 let toastTimer;
@@ -550,6 +747,9 @@ function syncViewToggle() {
     btn.setAttribute("aria-pressed", btn.dataset.view === state.view ? "true" : "false");
   }
 }
+
+$("settings-btn").addEventListener("click", settingsDialog);
+$("firstrun-btn").addEventListener("click", settingsDialog);
 
 $("rescan-btn").addEventListener("click", async () => {
   $("rescan-btn").disabled = true;

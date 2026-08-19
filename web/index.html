@@ -33,6 +33,7 @@
       </select>
       <button id="sizes-btn" class="ghost" title="Walk folders to measure size on disk">Measure sizes</button>
       <button id="rescan-btn" class="ghost" title="Rescan all sources">Rescan</button>
+      <button id="settings-btn" class="ghost" title="Settings" aria-label="Settings">&#9881;</button>
     </div>
   </header>
 
@@ -41,6 +42,14 @@
   <main>
     <div id="grid" class="grid"></div>
     <p id="empty" class="empty" hidden>Nothing matches that search.</p>
+
+    <section id="firstrun" class="firstrun" hidden>
+      <h2>No games yet</h2>
+      <p>Steam, Epic, Xbox and Riot are found on their own. Game folders that do not
+         belong to a launcher need pointing at once &mdash; your drives have already
+         been scanned for likely candidates.</p>
+      <button id="firstrun-btn" class="primary">Choose game folders&hellip;</button>
+    </section>
   </main>
 
   <div id="toast" class="toast" hidden></div>

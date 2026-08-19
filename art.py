@@ -330,6 +330,33 @@ def _extract_icon(exe_path, dest_png):
 _sgdb_offline = False
 
 
+def reset_network_state():
+    """Forget that lookups failed, so a corrected API key takes effect immediately.
+
+    _sgdb_offline disables SteamGridDB for the rest of the run after the first failure,
+    which is right when the key is wrong or DNS is broken -- but it also means saving a
+    working key in Settings would appear to do nothing until a restart. The .miss
+    markers block re-resolution for 24h for the same reason, so they go too.
+    """
+    global _sgdb_offline
+    _sgdb_offline = False
+
+    dropped = 0
+    try:
+        for name in os.listdir(config.ART_DIR):
+            if name.endswith(".miss"):
+                try:
+                    os.remove(os.path.join(config.ART_DIR, name))
+                    dropped += 1
+                except OSError:
+                    pass
+    except OSError:
+        return 0
+    if dropped:
+        print(f"[art] cleared {dropped} cached miss marker(s)")
+    return dropped
+
+
 def _sgdb_get(url, key):
     """GET a SteamGridDB endpoint. Returns the `data` payload, or None."""
     global _sgdb_offline

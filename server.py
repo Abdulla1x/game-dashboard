@@ -8,6 +8,7 @@ import json
 import mimetypes
 import os
 import posixpath
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 import art
 import config
+import detect
 import exefind
 import launch as launcher
 import playtime
@@ -221,6 +223,164 @@ def _validate_exe(game, raw):
     return True, candidate
 
 
+# -- settings ------------------------------------------------------------
+
+# Keys the settings panel may write. Anything else is rejected rather than ignored, so
+# a typo in the UI surfaces instead of quietly landing in config.json.
+_SECRET_KEYS = ("steam_api_key", "steamgriddb_key")
+# Changing these cannot take effect until the process restarts or install.py re-runs.
+_RESTART_KEYS = ("port", "playtime_poll_seconds")
+_SHORTCUT_KEYS = ("browser", "window_size")
+
+
+class Invalid(ValueError):
+    """A setting the user can fix, phrased for them rather than for a log."""
+
+
+def _v_path(value, field):
+    if not isinstance(value, str):
+        raise Invalid(f"{field} must be text")
+    value = value.strip().replace("/", "\\")
+    if not value:
+        raise Invalid(f"{field} must not be empty")
+    if "\x00" in value or "\n" in value:
+        raise Invalid(f"{field} contains an illegal character")
+    if not winpath.drive_of(value) and not value.startswith("\\\\"):
+        raise Invalid(f"{value!r} is not a Windows path (try D:\\Games)")
+    # Keep a bare drive root as "D:\"; strip the trailing slash from anything else.
+    return value if len(value) <= 3 else value.rstrip("\\")
+
+
+def _v_paths(value, field):
+    if not isinstance(value, list):
+        raise Invalid(f"{field} must be a list of folders")
+    if len(value) > 64:
+        raise Invalid(f"{field}: too many folders")
+    out, seen = [], set()
+    for item in value:
+        path = _v_path(item, field)
+        if path.lower() not in seen:
+            seen.add(path.lower())
+            out.append(path)
+    return out
+
+
+def _v_secret(value, field):
+    if not isinstance(value, str):
+        raise Invalid(f"{field} must be text")
+    value = value.strip()
+    if value and not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value):
+        raise Invalid(f"{field} does not look like a key")
+    return value
+
+
+def _v_bool(value, field):
+    if not isinstance(value, bool):
+        raise Invalid(f"{field} must be true or false")
+    return value
+
+
+def _v_port(value, field):
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise Invalid("port must be a number")
+    if not 1024 <= port <= 65535:
+        raise Invalid("port must be between 1024 and 65535")
+    return port
+
+
+def _v_steam_id(value, field):
+    value = str(value).strip()
+    if value and not re.fullmatch(r"\d{1,20}", value):
+        raise Invalid("steam_id must be digits only")
+    return value
+
+
+def _v_browser(value, field):
+    if value not in ("chrome", "edge", "default"):
+        raise Invalid("browser must be chrome, edge or default")
+    return value
+
+
+_EDITABLE = {
+    "scan_roots": _v_paths,
+    "extra_game_dirs": _v_paths,
+    "steam_api_key": _v_secret,
+    "steamgriddb_key": _v_secret,
+    "steam_id": _v_steam_id,
+    "include_owned": _v_bool,
+    "port": _v_port,
+    "browser": _v_browser,
+    "steam_root": _v_path,
+    "epic_manifests": _v_path,
+    "xbox_games": _v_path,
+    "riot_root": _v_path,
+}
+
+
+def settings_payload():
+    """Current settings, with secrets described rather than disclosed.
+
+    A masked value in the same field invites the client to send the mask back and
+    overwrite the real key with bullets, so secrets travel as {set, hint} instead and
+    "leave blank to keep" is the natural default.
+    """
+    cfg = config.load()
+    values = {k: cfg.get(k) for k in _EDITABLE if k not in _SECRET_KEYS}
+    secrets = {}
+    for key in _SECRET_KEYS:
+        raw = (cfg.get(key) or "").strip()
+        secrets[key] = {"set": bool(raw), "hint": raw[-4:] if len(raw) > 4 else ""}
+    return {
+        "config": values,
+        "secrets": secrets,
+        "defaults": {k: config.DEFAULTS.get(k) for k in _EDITABLE},
+        "config_path": winpath.windows(config.CONFIG_JSON),
+    }
+
+
+def write_settings(payload):
+    """Validate and merge into config.json. Returns (response, error)."""
+    if not isinstance(payload, dict):
+        return None, "expected an object"
+
+    changes = {}
+    for key, value in payload.items():
+        if key not in _EDITABLE:
+            return None, f"unknown setting: {key}"
+        # A secret left out, or sent as null, keeps whatever is already stored.
+        if key in _SECRET_KEYS and value is None:
+            continue
+        try:
+            changes[key] = _EDITABLE[key](value, key)
+        except Invalid as exc:
+            return None, str(exc)
+
+    stored = config.read_json(config.CONFIG_JSON, {})
+    if not isinstance(stored, dict):
+        stored = {}
+    before = config.load()
+    stored.update(changes)
+    config.write_json(config.CONFIG_JSON, stored)
+
+    changed = [k for k, v in changes.items() if before.get(k) != v]
+    # Folders that do not exist are allowed -- a drive can be offline -- but say so.
+    warnings = [f"{p} does not exist right now"
+                for k in ("scan_roots", "extra_game_dirs") if k in changes
+                for p in changes[k] if not winpath.isdir(p)]
+    if any(k in changed for k in _SECRET_KEYS):
+        art.reset_network_state()
+
+    return {
+        "ok": True,
+        "changed": changed,
+        "warnings": warnings,
+        "restart_required": [k for k in changed if k in _RESTART_KEYS],
+        "reinstall_required": [k for k in changed if k in _SHORTCUT_KEYS],
+    }, None
+
+
 # -- HTTP ----------------------------------------------------------------
 
 
@@ -350,6 +510,12 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/candidates":
             return self._candidates(query.get("id", [""])[0])
 
+        if route == "/api/settings":
+            return self._send(200, settings_payload())
+
+        if route == "/api/detect":
+            return self._detect(query.get("refresh", [""])[0] == "1")
+
         if route.startswith("/api/"):
             return self._send(404, {"error": "unknown endpoint"})
 
@@ -379,6 +545,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "sizing": True})
         if route == "/api/override":
             return self._override(payload)
+        if route == "/api/settings":
+            return self._settings(payload)
         return self._send(404, {"error": "unknown endpoint"})
 
     # -- handlers --
@@ -438,6 +606,29 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "no folder for this game"})
         found = exefind.candidates(game["install_dir"], game["name"], limit=30)
         return self._send(200, {"candidates": found})
+
+    def _detect(self, refresh):
+        """Detection is a few seconds of disk work, so the answer is kept."""
+        cached = STATE.get("detected")
+        if cached and not refresh:
+            return self._send(200, cached)
+        try:
+            found = detect.run(STATE["cfg"])
+        except Exception as exc:
+            print(f"[detect] failed: {exc}")
+            found = {"candidates": [], "launchers": {}, "drives": [], "error": str(exc)}
+        STATE["detected"] = found
+        return self._send(200, found)
+
+    def _settings(self, payload):
+        result, error = write_settings(payload)
+        if error:
+            return self._send(400, {"error": error})
+        # Reload and rescan exactly as /api/rescan does; load_library re-reads config.
+        STATE["detected"] = None
+        threading.Thread(target=load_library, args=(True,), daemon=True).start()
+        result["scanning"] = True
+        return self._send(200, result)
 
     def _override(self, payload):
         game_id = payload.get("id")
