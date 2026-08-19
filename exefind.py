@@ -56,15 +56,26 @@ def _is_rejected(stem):
     return any(rx.search(low) for rx in _SKIP_RE)
 
 
+def _depth(path):
+    """Separator count, whichever separator this platform's paths actually use.
+
+    os.walk hands back native paths: forward slashes under WSL, backslashes on Windows.
+    Counting only "/" made every Windows path measure as depth 0, so the max_depth prune
+    below never fired and each game folder was walked to the bottom — minutes per scan,
+    and depth scoring that always saw 0.
+    """
+    return path.replace("\\", "/").rstrip("/").count("/")
+
+
 def _walk(dir_win, max_depth):
     """Yield (win_path, depth, size) for every .exe under dir_win, pruning junk dirs."""
     root_native = winpath.native(dir_win)
     if not os.path.isdir(root_native):
         return
 
-    base_depth = root_native.rstrip("/").count("/")
+    base_depth = _depth(root_native)
     for cur, subdirs, files in os.walk(root_native):
-        depth = cur.rstrip("/").count("/") - base_depth
+        depth = _depth(cur) - base_depth
         if depth >= max_depth:
             subdirs[:] = []
         else:
@@ -79,6 +90,45 @@ def _walk(dir_win, max_depth):
             except OSError:
                 fsize = 0
             yield winpath.windows(full), depth, fsize
+
+
+# Entries examined before a probe gives up and answers from what it has seen. Detection
+# runs this across every folder on every drive, so it is a budget, not a limit.
+PROBE_DEPTH = 2
+PROBE_ENTRY_CAP = 400
+
+
+def quick_probe(dir_win, max_depth=PROBE_DEPTH, entry_cap=PROBE_ENTRY_CAP):
+    """Cheap yes/no: does this folder look like it holds a game?
+
+    Stops at the first plausible .exe, at max_depth, or after entry_cap files — and
+    never triggers the depth-6 retry, which is what makes `pick` too slow to run across
+    a whole drive just to count candidates. `pick` remains the authority on what a game
+    actually is; this only decides what to *offer* during setup, so a false positive
+    costs the user one unticked checkbox.
+    """
+    root_native = winpath.native(dir_win)
+    if not os.path.isdir(root_native):
+        return False
+
+    seen = 0
+    base_depth = _depth(root_native)
+    try:
+        for cur, subdirs, files in os.walk(root_native):
+            if _depth(cur) - base_depth >= max_depth:
+                subdirs[:] = []
+            else:
+                subdirs[:] = [d for d in subdirs if d.lower() not in _SKIP_DIRS]
+
+            for fname in files:
+                seen += 1
+                if seen > entry_cap:
+                    return False
+                if fname.lower().endswith(".exe") and not _is_rejected(fname[:-4]):
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def candidates(dir_win, game_name=None, max_depth=MAX_DEPTH, limit=25, deep=True):
