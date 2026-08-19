@@ -138,7 +138,8 @@ def _is_duplicate(record, claimed_dirs, claimed_exes):
 
 # Lower wins when the same game turns up from two sources. A launcher-backed record
 # always beats a bare folder: it carries proper metadata and starts the game the way the
-# game expects (Epic's Fortnite at D:\Fortnite over a stale copy in E:\Games\Fortnite).
+# game expects — a launcher's own install beats a stale copy of the same game sitting in
+# a scanned folder, which is common after moving a library between drives.
 _SOURCE_RANK = {"steam": 0, "epic": 1, "xbox": 2, "riot": 3, "manual": 4,
                 "shortcut": 5, "folder": 6}
 
@@ -174,12 +175,37 @@ def dedupe_by_name(games, verbose=False):
     return list(best.values())
 
 
+def _entries(overrides, key):
+    """The list under `key`, skipping anything the wrong shape.
+
+    overrides.json is meant to be hand-edited, so a stray value here is a user typo,
+    not a bug. It used to raise straight out of the scan with no context.
+    """
+    raw = overrides.get(key)
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        print(f"[overrides] {key!r} should be a list, got {type(raw).__name__} — ignoring")
+        return []
+    out = []
+    for item in raw:
+        if isinstance(item, dict) and item.get("id"):
+            out.append(item)
+        else:
+            print(f"[overrides] skipping malformed entry in {key!r}: {item!r}")
+    return out
+
+
 def apply_overrides(games, overrides):
     out = []
     by_id = {g["id"]: g for g in games}
 
-    for extra in overrides.get("extra_games", []):
-        if extra.get("id") and extra["id"] not in by_id:
+    if not isinstance(overrides, dict):
+        print(f"[overrides] expected an object, got {type(overrides).__name__} — ignoring")
+        overrides = {}
+
+    for extra in _entries(overrides, "extra_games"):
+        if extra["id"] not in by_id:
             record = _blank_record(extra)
             games.append(record)
             by_id[record["id"]] = record
@@ -187,8 +213,8 @@ def apply_overrides(games, overrides):
     # Xbox, Battle.net, Riot, Rockstar and EA expose no ownership API we can read, so
     # anything from those libraries is listed by hand here and treated like any other
     # owned-but-not-installed game.
-    for owned in overrides.get("owned_games", []):
-        if owned.get("id") and owned["id"] not in by_id:
+    for owned in _entries(overrides, "owned_games"):
+        if owned["id"] not in by_id:
             record = _blank_owned_record(owned)
             games.append(record)
             by_id[record["id"]] = record
@@ -198,12 +224,20 @@ def apply_overrides(games, overrides):
         if not rule:
             out.append(game)
             continue
+        if not isinstance(rule, dict):
+            print(f"[overrides] {game['id']!r} should map to an object — ignoring")
+            out.append(game)
+            continue
         if rule.get("hidden"):
             game["hidden"] = True
         if rule.get("name"):
             game["name"] = rule["name"]
         if rule.get("steam_appid"):
-            game["steam_appid"] = int(rule["steam_appid"])
+            try:
+                game["steam_appid"] = int(rule["steam_appid"])
+            except (TypeError, ValueError):
+                print(f"[overrides] {game['id']!r}: steam_appid "
+                      f"{rule['steam_appid']!r} is not a number — ignoring")
         if rule.get("art"):
             game["art_override"] = rule["art"]
         if rule.get("exe"):

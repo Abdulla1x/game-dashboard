@@ -27,6 +27,9 @@ STATE = {
     "tracker": None,
     "scanning": False,
     "sizing": False,
+    # The port actually bound, which --port can move off the configured one. The
+    # request guard compares the Host header against it.
+    "port": None,
 }
 _lock = threading.Lock()
 
@@ -136,6 +139,88 @@ def compute_sizes():
             STATE["sizing"] = False
 
 
+# -- request validation --------------------------------------------------
+
+# Cover art may live anywhere on disk — the user picks the file — so the constraint is
+# on *what* the file is, not where it sits.
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+_IMAGE_MAGIC = (
+    b"\xff\xd8\xff",         # jpeg
+    b"\x89PNG\r\n\x1a\n",    # png
+    b"GIF87a", b"GIF89a",      # gif
+    b"BM",                     # bmp
+)
+
+
+def _is_image_file(path):
+    """True only if the file really begins with image magic bytes.
+
+    The extension check in _override exists to give a good error message; this is the
+    check that matters, because data/overrides.json can also be edited by hand and the
+    art endpoint reads whatever it names.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return False
+    if head.startswith(_IMAGE_MAGIC):
+        return True
+    return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+
+
+def _within(root, target):
+    """True if `target` is `root` or sits underneath it. Case-insensitive."""
+    try:
+        root = os.path.normcase(os.path.realpath(root))
+        target = os.path.normcase(os.path.realpath(target))
+        return os.path.commonpath([root, target]) == root
+    except (ValueError, OSError):
+        return False  # different drives, or a path we cannot resolve
+
+
+def _art_servable(path):
+    """Gate on the bytes leaving /api/art.
+
+    Pointing at any image on disk is a real feature (see the art dialog), but without a
+    content check that same field turns the endpoint into an arbitrary file read —
+    config.json, data/epic_auth.json, an SSH key. The generated .svg cards are ours and
+    live under data/art/.
+    """
+    if path.lower().endswith(".svg"):
+        return _within(config.ART_DIR, path)
+    return _is_image_file(path)
+
+
+def _validate_exe(game, raw):
+    """(ok, resolved_path_or_error) for an exe arriving over HTTP.
+
+    A hand-edited overrides.json may point anywhere; that is documented and the file is
+    already trusted. A value that arrived over HTTP is not: without this, POSTing an
+    absolute exe to /api/override and then calling /api/launch runs any binary on the
+    machine, and any page open in the browser can make both calls.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return False, "exe must be a path"
+    if not raw.lower().endswith(".exe"):
+        return False, "executable must be a .exe"
+
+    install_dir = game.get("install_dir")
+    if not install_dir:
+        return False, "this game has no install folder to pick an executable from"
+
+    candidate = raw if winpath.drive_of(raw) else winpath.join(install_dir, raw)
+    target = winpath.native(candidate)
+    # realpath resolves junctions, symlinks and the drive-relative "D:foo" form that
+    # winpath.drive_of does not treat as absolute, so each of those lands outside the
+    # install dir and is refused here rather than launched.
+    if not _within(winpath.native(install_dir), target):
+        return False, "executable must be inside the game folder"
+    if not os.path.isfile(target):
+        return False, "no such executable"
+    return True, candidate
+
+
 # -- HTTP ----------------------------------------------------------------
 
 
@@ -193,16 +278,62 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
         return self._send(200, body, ctype, headers)
 
+    def _guard(self):
+        """Refuse anything a page on another origin could have aimed at us.
+
+        Binding loopback keeps the network out, but it is not a boundary against the
+        user's own browser: any site they have open can POST to 127.0.0.1. Requiring a
+        JSON content type is what forces a CORS preflight on those requests, and since
+        no CORS headers are ever emitted the preflight fails and the request never
+        arrives. Without it they are "simple requests" that get sent regardless of
+        whether the other origin may read the reply — and override -> launch never
+        needed to read one.
+        """
+        port = STATE.get("port") or STATE["cfg"].get("port")
+        hosts = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+
+        # No Host match -> a DNS-rebinding name is pointing at us.
+        if (self.headers.get("Host") or "").strip() not in hosts:
+            self._send(403, {"error": "bad host"})
+            return False
+
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and origin not in {f"http://{h}" for h in hosts}:
+            self._send(403, {"error": "cross-origin request refused"})
+            return False
+
+        # Modern browsers state the relationship themselves. Absent on curl and other
+        # non-browser clients, so this only ever tightens the browser case.
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if site and site not in ("same-origin", "none"):
+            self._send(403, {"error": "cross-site request refused"})
+            return False
+
+        if self.command == "POST":
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+            if ctype.lower() != "application/json":
+                self._send(415, {"error": "expected Content-Type: application/json"})
+                return False
+        return True
+
+    _MAX_BODY = 1 << 20
+
     def _body_json(self):
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(length) or b"{}")
+            if length > self._MAX_BODY:
+                return {}
+            payload = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, OSError):
             return {}
+        # Every caller does payload.get(...); a list or string body would raise there.
+        return payload if isinstance(payload, dict) else {}
 
     # -- routes --
 
     def do_GET(self):
+        if not self._guard():
+            return None
         parsed = urlparse(self.path)
         route = posixpath.normpath(parsed.path)
         query = parse_qs(parsed.query)
@@ -222,14 +353,17 @@ class Handler(BaseHTTPRequestHandler):
         if route.startswith("/api/"):
             return self._send(404, {"error": "unknown endpoint"})
 
-        # Static assets, confined to web/.
+        # Static assets, confined to web/. The containment test is a path comparison,
+        # not a string prefix: "web-backup" starts with "web" but is not inside it.
         rel = route.lstrip("/")
-        target = os.path.normpath(os.path.join(config.WEB_DIR, rel))
-        if not target.startswith(config.WEB_DIR) or not os.path.isfile(target):
+        target = os.path.join(config.WEB_DIR, rel)
+        if not _within(config.WEB_DIR, target) or not os.path.isfile(target):
             return self._send(404, {"error": "not found"})
         return self._send_file(target, cache=True)
 
     def do_POST(self):
+        if not self._guard():
+            return None
         route = posixpath.normpath(urlparse(self.path).path)
         payload = self._body_json()
 
@@ -285,6 +419,12 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[art] {game['name']}: {exc}")
             path, kind = None, "placeholder"
 
+        if path and not _art_servable(path):
+            # An art_override can be hand-written into overrides.json, so the bytes are
+            # only served once they are confirmed to be an image.
+            print(f"[art] refusing to serve non-image {path}")
+            path = None
+
         if path:
             return self._send_file(path, cache=True)
         return self._send(
@@ -301,8 +441,38 @@ class Handler(BaseHTTPRequestHandler):
 
     def _override(self, payload):
         game_id = payload.get("id")
-        if not game_id:
+        if not isinstance(game_id, str) or not game_id:
             return self._send(400, {"error": "id required"})
+
+        # Only ever override a game that exists. That is all the UI does, and it also
+        # keeps the reserved keys apply_overrides reads as lists (extra_games,
+        # owned_games) out of reach — a dict written to one of those breaks every
+        # later scan with an AttributeError until the file is repaired by hand.
+        game = find_game(game_id)
+        if not game:
+            return self._send(404, {"error": "no such game"})
+
+        if payload.get("exe"):
+            ok, resolved = _validate_exe(game, payload["exe"])
+            if not ok:
+                return self._send(400, {"error": resolved})
+            payload = dict(payload, exe=resolved)
+
+        if payload.get("steam_appid") is not None:
+            try:
+                appid = int(payload["steam_appid"])
+            except (TypeError, ValueError):
+                return self._send(400, {"error": "steam_appid must be a number"})
+            if not 1 <= appid <= 20_000_000:
+                return self._send(400, {"error": "steam_appid out of range"})
+            payload = dict(payload, steam_appid=appid)
+
+        if payload.get("art"):
+            art_path = payload["art"]
+            if not isinstance(art_path, str) or not art_path.lower().endswith(_IMAGE_EXTS):
+                return self._send(400, {"error": "cover art must be an image file"})
+            if not _is_image_file(winpath.native(art_path)):
+                return self._send(400, {"error": "that file is not a readable image"})
 
         overrides = config.read_json(config.OVERRIDES_JSON, {})
         rule = overrides.get(game_id, {})
@@ -320,12 +490,10 @@ class Handler(BaseHTTPRequestHandler):
         config.write_json(config.OVERRIDES_JSON, overrides)
 
         # Re-apply in place so the UI updates without a full rescan.
-        game = find_game(game_id)
-        if game:
-            if "steam_appid" in payload or "art" in payload:
-                _forget_art(game_id)
-            scan.apply_overrides([game], overrides)
-            config.write_json(config.LIBRARY_JSON, STATE["library"])
+        if "steam_appid" in payload or "art" in payload:
+            _forget_art(game_id)
+        scan.apply_overrides([game], overrides)
+        config.write_json(config.LIBRARY_JSON, STATE["library"])
         return self._send(200, {"ok": True, "override": rule})
 
 
@@ -349,11 +517,19 @@ def serve(port=None, open_browser=False):
     STATE["tracker"] = playtime.Tracker(cfg.get("playtime_poll_seconds", 15))
     STATE["tracker"].start()
 
-    load_library(rescan=not os.path.exists(config.LIBRARY_JSON))
-    count = len(STATE["library"].get("games", []))
-
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"[server] {count} games — http://127.0.0.1:{port}")
+    STATE["port"] = port
+    print(f"[server] http://127.0.0.1:{port}")
+
+    # Bind first, scan second. A first run with no data/library.json can spend minutes
+    # inside owned_steam's store lookups, and doing that before the socket exists means
+    # the window opens on a dead port with no console (pythonw) to explain why. The
+    # payload already carries a "scanning" flag, so the page loads and fills in.
+    threading.Thread(
+        target=load_library,
+        args=(not os.path.exists(config.LIBRARY_JSON),),
+        daemon=True,
+    ).start()
 
     if open_browser:
         import webbrowser
