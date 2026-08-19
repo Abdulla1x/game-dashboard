@@ -317,32 +317,26 @@ def _print_table(games):
             print(f" {flag} {g['name'][:38]:40s} {size}  {g.get('exe_name') or g['launch']['kind']}")
 
 
-def _selftest(games):
-    """Encodes the plan's verification criteria."""
-    by_id = {g["id"]: g for g in games}
-    names = {g["name"].lower() for g in games}
+def _selftest(games, min_games=0):
+    """Structural invariants that must hold on any machine.
+
+    What this deliberately no longer does is assert against one specific library. It
+    used to check for hardcoded ids like "folder:GVALORANT" and for ">=60 installed" --
+    the first could never match (folder_id turns "G:\\VALORANT" into "folder:G--VALORANT",
+    so those literals were dead from the first commit and quietly tested nothing), and
+    the second simply fails for everybody else. The behaviour they were meant to protect
+    -- decoy folders staying out, an uninstaller never winning -- is covered properly by
+    tests/test_exefind.py, which builds its own trees and runs anywhere.
+
+    Pass --expect-min-games to assert a floor against your own library.
+    """
     failures = []
-
-    # Decoys: clip folders on G:\ that contain no executable.
-    for decoy in ("folder:GVALORANT", "folder:GCounter-Strike 2",
-                  "folder:GKovaaK's", "folder:Grocketleague"):
-        if decoy in by_id:
-            failures.append(f"decoy folder was listed as a game: {decoy}")
-
-    stray = by_id.get("folder:EGames--Stray")
-    if stray and stray.get("exe_name", "").lower().startswith("unins"):
-        failures.append("Stray resolved to the uninstaller")
 
     installed = [g for g in games if g.get("installed", True)]
     owned = [g for g in games if not g.get("installed", True)]
 
-    steam_games = [g for g in installed if g["source"] == "steam"]
-    if len(steam_games) < 15:
-        failures.append(f"expected >=15 installed Steam games, got {len(steam_games)}")
-
-    # The owned library is additive: it must never eat into what is on disk.
-    if len(installed) < 60:
-        failures.append(f"expected >=60 installed games, got {len(installed)}")
+    if min_games and len(installed) < min_games:
+        failures.append(f"expected >={min_games} installed games, got {len(installed)}")
 
     installed_appids = {g["steam_appid"] for g in installed if g.get("steam_appid")}
     for g in owned:
@@ -385,7 +379,10 @@ def main():
     config.safe_console()
     ap = argparse.ArgumentParser(description="Scan the game library.")
     ap.add_argument("--dry-run", action="store_true", help="print results, do not write")
-    ap.add_argument("--selftest", action="store_true", help="assert verification criteria")
+    ap.add_argument("--selftest", action="store_true", help="assert structural invariants")
+    ap.add_argument("--expect-min-games", type=int, default=0, metavar="N",
+                    help="also require at least N installed games (your library, not a "
+                         "portable check)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -399,7 +396,7 @@ def main():
           f"{len(games) - len(on_disk)} owned)")
 
     if args.selftest:
-        return _selftest(games)
+        return _selftest(games, args.expect_min_games)
     if not args.dry_run:
         print(f"Wrote {config.LIBRARY_JSON}")
     return 0

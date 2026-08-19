@@ -211,7 +211,11 @@ def _validate_exe(game, raw):
     if not install_dir:
         return False, "this game has no install folder to pick an executable from"
 
-    candidate = raw if winpath.drive_of(raw) else winpath.join(install_dir, raw)
+    # Treat anything already absolute as absolute so it faces the containment check
+    # below. Only a drive letter counts on Windows, but under WSL (and in the tests)
+    # paths are POSIX, and silently joining those to install_dir would be misleading.
+    absolute = bool(winpath.drive_of(raw)) or raw.startswith(("\\\\", "/"))
+    candidate = raw if absolute else winpath.join(install_dir, raw)
     target = winpath.native(candidate)
     # realpath resolves junctions, symlinks and the drive-relative "D:foo" form that
     # winpath.drive_of does not treat as absolute, so each of those lands outside the
