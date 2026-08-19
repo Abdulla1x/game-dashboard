@@ -9,6 +9,7 @@ Anything it gets wrong is one click to hide.
 import os
 import re
 
+import config
 import winpath
 import winshell
 
@@ -68,7 +69,7 @@ def scan(cfg, claimed_paths=None, claimed_appids=None):
     found = {}
 
     appdata = (os.path.expandvars("%APPDATA%") if winpath.ON_WINDOWS
-               else f"C:\\Users\\{cfg.get('windows_user', 'Mabdu')}\\AppData\\Roaming")
+               else f"C:\\Users\\{config.windows_user(cfg)}\\AppData\\Roaming")
 
     for menu in _START_MENUS:
         root = winpath.native(menu.replace("%APPDATA%", appdata))

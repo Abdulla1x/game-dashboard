@@ -1,9 +1,10 @@
 """Standalone / repack game folders — the messiest and largest source.
 
 A directory becomes a game only if `exefind` finds a plausible executable in it. That
-gate is load-bearing: several folders on this machine (G:\\VALORANT, G:\\Counter-Strike 2,
-G:\\KovaaK's, G:\\rocketleague) hold only Medal clip recordings and would otherwise show
-up as phantom games.
+gate is load-bearing rather than a nicety: clip recorders (Medal, ReLive, ShadowPlay)
+create a folder named after every game you play, sitting right beside real installs and
+containing nothing but video. Drop the gate and each one becomes a phantom game that
+cannot be launched.
 """
 
 import os

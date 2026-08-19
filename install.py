@@ -166,7 +166,7 @@ def start_menu_dir(cfg):
     if winpath.ON_WINDOWS:
         base = os.path.expandvars("%APPDATA%")
     else:
-        base = f"C:\\Users\\{cfg.get('windows_user', 'Mabdu')}\\AppData\\Roaming"
+        base = f"C:\\Users\\{config.windows_user(cfg)}\\AppData\\Roaming"
     return winpath.join(base, "Microsoft", "Windows", "Start Menu", "Programs")
 
 

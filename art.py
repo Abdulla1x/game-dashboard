@@ -485,8 +485,8 @@ def _shade(rgb, factor, floor=0):
 def _normalize(rgb):
     """Pull a colour into a mid range so the card is neither black nor washed out.
 
-    Plenty of icons are dominated by near-black (CurseForge) or near-white (MECCH
-    CHAMELEON); shading those directly gives a flat grey card.
+    Plenty of icons are dominated by near-black or near-white — launcher icons and
+    minimal logos especially — and shading those directly gives a flat grey card.
     """
     lum = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
     if lum < 1:

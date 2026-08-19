@@ -1,33 +1,34 @@
 {
-  "_comment": "Copy to config.json and edit. Anything omitted falls back to DEFAULTS in config.py.",
+  "_comment": "Copy to config.json and edit. Anything omitted falls back to DEFAULTS in config.py. You normally do not need to write this by hand — the dashboard detects your setup on first run and the Settings panel writes this file for you.",
 
   "port": 8777,
   "browser": "chrome",
   "window_size": "1400,900",
   "playtime_poll_seconds": 15,
 
+  "_scan_roots": "Folders whose immediate children are games, e.g. a folder holding one subfolder per game. Detected automatically; listed here if you prefer to set them yourself.",
+  "scan_roots": [
+    "D:\\Games",
+    "E:\\SteamLibrary\\steamapps\\common"
+  ],
+  "_extra_game_dirs": "Individual game folders that are not children of a scan root.",
+  "extra_game_dirs": [],
+
   "_owned": "Games you own but have not installed. They appear only under the All view.",
   "include_owned": true,
+  "_steam_keys": "Free key from steamcommunity.com/dev/apikey, plus your 64-bit SteamID. Needs Steam privacy set to 'Game details: Public'. Without these the owned library is inferred from Steam's local cache instead.",
   "steam_api_key": "",
   "steam_id": "",
 
   "_art": "Free key from steamgriddb.com/profile/preferences/api — covers for non-Steam games.",
   "steamgriddb_key": "",
 
-  "scan_roots": [
-    "E:\\Games",
-    "D:\\Games",
-    "D:\\Loading Bay Games",
-    "G:\\"
-  ],
-  "extra_game_dirs": [
-    "D:\\Fortnite"
-  ],
-
+  "_launchers": "Where each launcher is installed. These defaults are the usual locations; detection corrects them if yours differ.",
   "steam_root": "C:\\Program Files (x86)\\Steam",
   "epic_manifests": "C:\\ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests",
   "xbox_games": "C:\\XboxGames",
-  "riot_root": "D:\\Riot Games",
+  "riot_root": "C:\\Riot Games",
 
-  "windows_user": "YourWindowsUsername"
+  "_windows_user": "Only needed when running from WSL, where %APPDATA% cannot be expanded.",
+  "windows_user": ""
 }

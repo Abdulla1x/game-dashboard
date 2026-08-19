@@ -31,8 +31,8 @@ def launch(game):
         native = winpath.native(value)
         if not os.path.exists(native):
             raise LaunchError(f"executable not found: {value}")
-        # Working directory is mandatory: many repacked games look for their assets
-        # relative to the CWD and fail silently when launched from elsewhere.
+        # Working directory is mandatory: plenty of games resolve their assets relative
+        # to the CWD and fail silently, or crash on startup, when launched from elsewhere.
         _spawn([native] + list(spec.get("args") or []), cwd=os.path.dirname(native))
         return value
 

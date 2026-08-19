@@ -23,18 +23,15 @@ DEFAULTS = {
     "browser": "chrome",
     "window_size": "1400,900",
     "playtime_poll_seconds": 15,
-    # Directories whose immediate children are candidate game folders.
-    "scan_roots": [
-        "E:\\Games",
-        "D:\\Games",
-        "D:\\Loading Bay Games",
-        "G:\\",
-    ],
+    # Directories whose immediate children are candidate game folders. Empty by
+    # default: `detect.py` proposes real ones from this machine on first run, and the
+    # settings panel writes the chosen set to config.json.
+    "scan_roots": [],
     # Individual game folders that are not children of a scan root.
-    "extra_game_dirs": [
-        "D:\\Fortnite",
-    ],
-    # Folder names skipped during scanning (case-insensitive).
+    "extra_game_dirs": [],
+    # Folder names skipped during scanning (case-insensitive). The capture-tool names
+    # matter more than they look: clip recorders create a folder per game, and those
+    # folders sit right next to real installs.
     "ignore_dirs": [
         "$RECYCLE.BIN", "System Volume Information", "Recovery", "Boot",
         "Config.Msi", "WUDownloadCache", "_Redist", "_CommonRedist",
@@ -56,10 +53,29 @@ DEFAULTS = {
     "steam_root": "C:\\Program Files (x86)\\Steam",
     "epic_manifests": "C:\\ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests",
     "xbox_games": "C:\\XboxGames",
-    "riot_root": "D:\\Riot Games",
-    # Only used when running from WSL, where %APPDATA% cannot be expanded.
-    "windows_user": "Mabdu",
+    "riot_root": "C:\\Riot Games",
+    # Only used when running from WSL, where %APPDATA% cannot be expanded. On Windows
+    # the real username comes from the environment; see `windows_user()`.
+    "windows_user": "",
 }
+
+
+def windows_user(cfg=None):
+    """The Windows account name, for building %APPDATA% paths.
+
+    On Windows this is just the environment. It only needs configuring under WSL, where
+    %APPDATA% cannot be expanded and there is nothing to infer it from.
+    """
+    if winpath.ON_WINDOWS:
+        name = os.environ.get("USERNAME") or os.environ.get("USER")
+        if name:
+            return name
+    name = (cfg or {}).get("windows_user") or os.environ.get("WINDOWS_USER")
+    if not name:
+        raise RuntimeError(
+            "Cannot tell which Windows user to use. Running outside Windows? "
+            'Set "windows_user" in config.json to your Windows account name.')
+    return name
 
 
 def load():
@@ -67,7 +83,15 @@ def load():
     if os.path.exists(CONFIG_JSON):
         try:
             with open(CONFIG_JSON, "r", encoding="utf-8") as fh:
-                cfg.update(json.load(fh))
+                loaded = json.load(fh)
+            # A top-level list or number would make cfg.update raise TypeError and take
+            # the server down before it binds. It is a hand-edited file, and now also a
+            # file the settings panel writes, so it gets checked rather than trusted.
+            if isinstance(loaded, dict):
+                cfg.update(loaded)
+            else:
+                print(f"[config] config.json should hold an object, got "
+                      f"{type(loaded).__name__} — using defaults")
         except (OSError, ValueError) as exc:
             print(f"[config] ignoring bad config.json: {exc}")
     return cfg
