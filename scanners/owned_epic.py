@@ -9,13 +9,24 @@ of the dashboard stays install-only.
 """
 
 import json
+import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
+import config
 import epicauth
 
 SOURCE = "epic"
+
+# The catalog is queried per namespace, and a library spreads across dozens of them —
+# each one a fresh connection and TLS handshake. Titles do not change, so the answers
+# are cached the same way owned_steam caches its store verdicts, and a rescan costs
+# nothing. BUDGET caps the first run: whatever has not resolved yet is left for next
+# time, because the whole owned library is additive.
+CATALOG_JSON = os.path.join(config.DATA_DIR, "epic_catalog.json")
+BUDGET = 45.0
 
 _LIBRARY = ("https://library-service.live.use1a.on.epicgames.com"
             "/library/api/public/items?includeMetadata=true")
@@ -29,7 +40,7 @@ _SKIP_CATEGORIES = {"addons", "digitalextras", "plugins", "projects", "engines",
                     "assets", "software"}
 
 
-def _get(url, token, timeout=30):
+def _get(url, token, timeout=12):
     headers = {"Authorization": f"bearer {token}",
                "User-Agent": "UELauncher/11.0.1 Windows/10.0.19041.1.256.64bit"}
     try:
@@ -55,16 +66,25 @@ def _library_records(token):
     return out
 
 
-def _catalog(token, namespace, item_ids):
-    """Catalog metadata for one namespace, in batches the service will accept."""
-    found = {}
-    for start in range(0, len(item_ids), 40):
-        batch = item_ids[start:start + 40]
+def _catalog(token, namespace, item_ids, cache, deadline):
+    """Catalog metadata for one namespace, in batches the service will accept.
+
+    Anything already cached is answered locally; only the remainder goes to the network,
+    and only while there is budget left.
+    """
+    found = {item: cache[item] for item in item_ids if item in cache}
+    missing = [item for item in item_ids if item not in cache]
+
+    for start in range(0, len(missing), 40):
+        if time.monotonic() > deadline:
+            break
+        batch = missing[start:start + 40]
         url = _CATALOG.format(ns=urllib.parse.quote(namespace))
         url += "".join(f"&id={urllib.parse.quote(i)}" for i in batch)
         data = _get(url, token)
         if isinstance(data, dict):
             found.update(data)
+            cache.update(data)
     return found
 
 
@@ -115,9 +135,15 @@ def scan(cfg):
         if ns and item and app:
             by_namespace.setdefault(ns, {})[item] = app
 
+    cache = config.read_json(CATALOG_JSON, {})
+    if not isinstance(cache, dict):
+        cache = {}
+    cached_at_start = len(cache)
+    deadline = time.monotonic() + BUDGET
+
     games = []
     for namespace, items in by_namespace.items():
-        catalog = _catalog(token, namespace, list(items))
+        catalog = _catalog(token, namespace, list(items), cache, deadline)
         for item_id, app_name in items.items():
             item = catalog.get(item_id)
             if not isinstance(item, dict) or not _is_game(item):
@@ -145,4 +171,9 @@ def scan(cfg):
             })
 
     print(f"[owned] Epic library: {len(games)} games ({len(records)} entries)")
+    if len(cache) != cached_at_start:
+        config.write_json(CATALOG_JSON, cache)
+    if time.monotonic() > deadline:
+        print("[epic] catalog budget reached; the rest resolves on the next scan")
+
     return games
