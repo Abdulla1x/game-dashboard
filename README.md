@@ -72,14 +72,22 @@ That covers the things no scanner will ever reach: a launcher living in `%LOCALA
 one game inside a bundle folder where only the other was detected, or a tracker the Start
 Menu scanner deliberately filters out.
 
-A `.lnk` is resolved to its real target as you add it, so the entry gets a cover built
-from the executable's own icon and its playtime is tracked like anything else.
+<img src="docs/screenshot-add.jpg" width="900" alt="The Add dialog, with a name and a path to a Start Menu shortcut filled in">
+
+A `.lnk` is resolved as you add it — **target, arguments and icon**. That matters more
+than it sounds: a launcher-hosted app puts its identity in the arguments and ships its
+artwork as a loose `.ico`, so Overwolf's Valorant Tracker shortcut is
+`OverwolfLauncher.exe -launchapp <id>` with its own icon file. Read only the target and
+you get plain Overwolf, wearing the Overwolf logo. Anything you type in **Arguments** is
+appended to whatever the shortcut already carried.
 
 ### Launching more than one thing
 
 **Right-click ▸ Launch with…** picks other entries to start alongside a game — a tracker
 with Valorant, a mod launcher with Minecraft. The tile then reads `+1 app`, and one click
 starts the lot.
+
+<img src="docs/screenshot-companions.jpg" width="900" alt="The Launch with dialog for VALORANT, with Valorant Tracker ticked at the top of the library list">
 
 The game starts first, and a companion that fails is reported rather than allowed to stop
 it. Companions are one level deep: a companion's own companions are not launched, which is
@@ -121,11 +129,15 @@ that bury the binary at `…\Gameface\Binaries\Win64\`.
 4. SteamGridDB, if a key is set — this is what covers Epic and Riot titles, launchers and
    mod clients, which have no Steam app ID at all
 5. A cover generated from the game's own artwork — the 256px icon inside the executable,
-   or the tile art a Store package ships — centred on a gradient sampled from that icon
+   the `.ico` a shortcut pointed at, or the tile art a Store package ships — centred on a
+   gradient sampled from that icon
 6. A generated lettered placeholder
 
 Icons come out of the executable's PE resource directory rather than via PowerShell's
 `ExtractAssociatedIcon`, which is capped at 32×32 and far too small to build a cover from.
+Standalone `.ico` files are read the same way: the on-disk format is the same directory
+the PE resource section keeps split apart, so a launcher-hosted app gets its *own*
+artwork rather than its launcher's.
 
 A bad name match is fixable: right-click → **Fix cover art** → set the Steam app ID.
 
@@ -136,8 +148,11 @@ Copy `config.example.json` if you would rather write it by hand. It is gitignore
 
 Folders are detected rather than typed: it enumerates your drives, reads Steam's install
 root from the registry, and counts how many subfolders of each candidate look like games.
+Untick one to stop scanning it; **✕** removes the row outright, which is what you want for
+a path that was a mistake rather than one you may re-enable. A detected folder that still
+exists will be offered again next time either way.
 
-<img src="docs/screenshot-settings.jpg" width="900" alt="The settings panel listing detected game folders with game counts">
+<img src="docs/screenshot-settings.jpg" width="900" alt="The settings panel: detected game folders with game counts and a remove button, and the individual game folders list below">
 
 ### Games you do not own on Steam alone
 
@@ -185,6 +200,9 @@ rescans. You can also edit it directly:
   ]
 }
 ```
+
+An entry may also carry `icon`, a path to a `.ico` or a binary to take the cover from
+when the launch target's own icon is the wrong one. **+ Add** fills it in from a shortcut.
 
 `extra_games` is what **+ Add** writes, and it is still the place to add a title by hand —
 useful for bundles where several games share one folder, so only one is detected
