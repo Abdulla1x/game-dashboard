@@ -330,10 +330,15 @@ main { padding: 14px 22px 60px; }
 .field.check span { font-size: 13px; }
 
 .folders { display: flex; flex-direction: column; gap: 6px; }
-.folder {
+/* Scoped to .folders so this outranks `.modal label`, which sets display:block and would
+   otherwise win on specificity -- a row is a <label> so clicking it toggles its checkbox,
+   and as a block it stacked the box, the path, the note and the remove button in a
+   column. */
+.folders .folder {
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  margin: 0;                /* .modal label adds a bottom margin; .folders owns the gap */
   padding: 9px 11px;
   background: var(--surface-2);
   border: 1px solid var(--line);
