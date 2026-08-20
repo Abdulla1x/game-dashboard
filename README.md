@@ -72,6 +72,8 @@ That covers the things no scanner will ever reach: a launcher living in `%LOCALA
 one game inside a bundle folder where only the other was detected, or a tracker the Start
 Menu scanner deliberately filters out.
 
+<img src="docs/screenshot-add.jpg" width="900" alt="The Add dialog, with a name and a path to a Start Menu shortcut filled in">
+
 A `.lnk` is resolved as you add it — **target, arguments and icon**. That matters more
 than it sounds: a launcher-hosted app puts its identity in the arguments and ships its
 artwork as a loose `.ico`, so Overwolf's Valorant Tracker shortcut is
@@ -84,6 +86,8 @@ appended to whatever the shortcut already carried.
 **Right-click ▸ Launch with…** picks other entries to start alongside a game — a tracker
 with Valorant, a mod launcher with Minecraft. The tile then reads `+1 app`, and one click
 starts the lot.
+
+<img src="docs/screenshot-companions.jpg" width="900" alt="The Launch with dialog for VALORANT, with Valorant Tracker ticked at the top of the library list">
 
 The game starts first, and a companion that fails is reported rather than allowed to stop
 it. Companions are one level deep: a companion's own companions are not launched, which is
@@ -144,8 +148,11 @@ Copy `config.example.json` if you would rather write it by hand. It is gitignore
 
 Folders are detected rather than typed: it enumerates your drives, reads Steam's install
 root from the registry, and counts how many subfolders of each candidate look like games.
+Untick one to stop scanning it; **✕** removes the row outright, which is what you want for
+a path that was a mistake rather than one you may re-enable. A detected folder that still
+exists will be offered again next time either way.
 
-<img src="docs/screenshot-settings.jpg" width="900" alt="The settings panel listing detected game folders with game counts">
+<img src="docs/screenshot-settings.jpg" width="900" alt="The settings panel: detected game folders with game counts and a remove button, and the individual game folders list below">
 
 ### Games you do not own on Steam alone
 
